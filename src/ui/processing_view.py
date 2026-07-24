@@ -37,10 +37,23 @@ class ProcessingView(QWidget):
 
         self._log = QTextEdit()
         self._log.setReadOnly(True)
+        self._log.setUndoRedoEnabled(False)
         self._log.setMinimumHeight(120)
 
         self._cancel_button = QPushButton("Cancel")
         self._cancel_button.setEnabled(False)
+        self._cancel_button.setStyleSheet(
+            "QPushButton {"
+            "  font-weight: 600; padding: 8px 14px;"
+            "  background: #2a2f38; color: #ffffff; border: 1px solid #1f242c;"
+            "  border-radius: 6px;"
+            "}"
+            "QPushButton:hover { background: #3a414d; border-color: #2a2f38; }"
+            "QPushButton:pressed { background: #1f242c; }"
+            "QPushButton:disabled {"
+            "  color: #b8bec8; background: #f3f4f7; border-color: #e4e7ec;"
+            "}"
+        )
         self._cancel_button.clicked.connect(self.cancel_requested.emit)
 
         buttons = QHBoxLayout()

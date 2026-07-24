@@ -57,6 +57,12 @@ def test_create_and_reload_project(tmp_path: Path, sample_image: Path, monkeypat
     assert len(loaded.reference_photos) == 1
     assert loaded.reference_photos[0].life_stage == LifeStage.CHILDHOOD
     assert loaded.input_folder.resolve() == input_dir.resolve()
+    assert loaded.include_subfolders is True
+
+    loaded.include_subfolders = False
+    repo.update(loaded)
+    reloaded = repo.load(saved.id)
+    assert reloaded.include_subfolders is False
 
     recent = repo.list_recent()
     assert any(item["id"] == saved.id for item in recent)

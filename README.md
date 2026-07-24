@@ -21,16 +21,32 @@ MVP complete through review + export, plus **Settings → model packs**:
 ## Requirements
 
 - Windows 10/11 (macOS later)
-- Python 3.11+ (tested with 3.13)
+- Python **3.11–3.13** (recommended: **3.11**; see `.python-version`)
+
+If Python is missing (or `C:\Python313` is incomplete / missing `Lib\`):
+
+```bat
+choco install python311 -y
+```
+
+Open a **new** terminal so `py -3.11` is on PATH, then run `setup.bat`.
 
 ## Setup (Windows)
+
+One-shot (creates/repairs `.venv` and installs deps with matching wheels):
 
 ```bat
 git clone https://github.com/OptimaLPro/ChronoFace.git
 cd ChronoFace
-python -m venv .venv
+setup.bat
+```
+
+Manual:
+
+```bat
+py -3.11 -m venv .venv
 .venv\Scripts\activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 Git Bash:
@@ -38,10 +54,10 @@ Git Bash:
 ```bash
 git clone https://github.com/OptimaLPro/ChronoFace.git
 cd ChronoFace
-python -m venv .venv
-source .venv/Scripts/activate
-pip install -r requirements.txt
+./setup.sh
 ```
+
+`setup.bat` / `setup.sh` detect a broken venv (e.g. NumPy built for 3.11 but running under 3.13) and recreate it. Use `setup.bat --force` to always rebuild.
 
 > InsightFace packs (buffalo_l recommended) are for **personal / non-commercial** use.
 > Open **Settings → Models** to compare speed vs quality, then **Downloads** to fetch packs.
@@ -49,9 +65,17 @@ pip install -r requirements.txt
 ## Run
 
 ```bat
+run.bat
+```
+
+Or with the venv activated:
+
+```bat
+.venv\Scripts\activate
 python app.py
 ```
 
+Do **not** use `source` in Command Prompt — that is a bash command. In CMD use `.venv\Scripts\activate`.
 ## Models (Settings)
 
 | Pack | Speed | Quality | Notes |
@@ -73,9 +97,8 @@ After changing models, run **Analyze Photos** again (embeddings are not compatib
 ## Windows portable build
 
 ```bat
-.venv\Scripts\activate
-pip install -r requirements.txt
-python scripts/build_windows.py
+setup.bat
+.venv\Scripts\python.exe scripts\build_windows.py
 ```
 
 Then run `dist\ChronoFace\ChronoFace.exe`.

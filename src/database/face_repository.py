@@ -130,6 +130,36 @@ class FaceRepository:
             connection.close()
         return self.get_face(face_id)
 
+    def restore_face_states(
+        self,
+        photo_id: int,
+        states: list[tuple[int, bool, float | None]],
+    ) -> None:
+        """Restore is_selected_target / estimated_age for faces on a photo."""
+        connection = initialize_database(self.db_path)
+        try:
+            connection.execute(
+                "UPDATE faces SET is_selected_target = 0 WHERE photo_id = ?",
+                (photo_id,),
+            )
+            for face_id, is_selected, estimated_age in states:
+                connection.execute(
+                    """
+                    UPDATE faces
+                    SET is_selected_target = ?, estimated_age = ?
+                    WHERE id = ? AND photo_id = ?
+                    """,
+                    (
+                        1 if is_selected else 0,
+                        estimated_age,
+                        face_id,
+                        photo_id,
+                    ),
+                )
+            connection.commit()
+        finally:
+            connection.close()
+
     def clear_reference_embeddings(self) -> None:
         connection = initialize_database(self.db_path)
         try:
@@ -185,6 +215,37 @@ class FaceRepository:
             return int(row["c"])
         finally:
             connection.close()
+
+    def delete_reference_embedding(
+        self,
+        embedding_id: int,
+        *,
+        delete_file: bool = False,
+    ) -> None:
+        """Remove a reference_embeddings row (optionally delete the .npy file)."""
+        connection = initialize_database(self.db_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT embedding_path FROM reference_embeddings
+                WHERE id = ? AND project_id = ?
+                """,
+                (embedding_id, self.project_id),
+            ).fetchone()
+            connection.execute(
+                "DELETE FROM reference_embeddings WHERE id = ? AND project_id = ?",
+                (embedding_id, self.project_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        if delete_file and row is not None and row["embedding_path"]:
+            path = Path(row["embedding_path"])
+            try:
+                if path.is_file():
+                    path.unlink()
+            except OSError:
+                logger.warning("Could not delete reference embedding file %s", path)
 
     @staticmethod
     def save_embedding(path: Path, embedding: np.ndarray) -> Path:

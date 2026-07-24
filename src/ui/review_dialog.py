@@ -6,25 +6,31 @@ from datetime import date
 from typing import Optional, Sequence
 
 from PySide6.QtCore import QObject, QSettings, QSize, QThread, Qt, Signal
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QKeySequence, QUndoStack
 from PySide6.QtWidgets import (
     QDialog,
-    QDialogButtonBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QVBoxLayout,
+    QWidget,
 )
 
+from src.commands import BulkPhotosSnapshotCommand, copy_photos
 from src.database.photo_repository import PhotoRepository
 from src.domain.models import PhotoRecord, ReferencePhoto, ReviewStatus
 from src.sorting.ranking import rank_photo_records
 from src.ui.photo_details_panel import PhotoDetailsPanel
-from src.ui.review_timeline import ReviewFilter, ReviewTimeline
+from src.ui.review_timeline import STATUS_LEGEND, ReviewFilter, ReviewTimeline
 from src.workers.face_pipeline import FaceAnalysisPipeline, FacePipelineConfig
+
+_LAYOUT_MARGIN = 8
+_LAYOUT_SPACING = 8
 
 
 class _SinglePhotoWorker(QObject):
@@ -80,6 +86,7 @@ class ReviewDialog(QDialog):
         date_of_birth: Optional[date] = None,
         project_name: str = "Project",
         reference_photos: Sequence[ReferencePhoto] | None = None,
+        undo_stack: QUndoStack | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"Review — {project_name}")
@@ -92,25 +99,23 @@ class ReviewDialog(QDialog):
         self._date_of_birth = date_of_birth
         self._reference_photos = list(reference_photos or [])
         self._repo = PhotoRepository(project_id)
+        self._undo_stack = undo_stack
         self._dirty_order = False
         self._settings = QSettings("ChronoFace", "ChronoFace")
         self._worker_thread: QThread | None = None
         self._worker: _SinglePhotoWorker | None = None
         self._progress: QProgressDialog | None = None
 
-        hint = QLabel(
-            "Drag thumbnails to fix order (youngest → oldest). "
-            "Select a photo to edit age, re-analyze, approve, exclude, "
-            "or mark as not the target. "
-            "Colors: blue=match, orange=low confidence, red=not found, "
-            "purple=no face, green=manual."
-        )
-        hint.setWordWrap(True)
+        help_banner = self._build_help_banner()
 
         self._timeline = ReviewTimeline()
         self._timeline.set_date_of_birth(date_of_birth)
         self._details = PhotoDetailsPanel()
-        self._details.set_project_context(project_id, date_of_birth)
+        self._details.set_project_context(
+            project_id,
+            date_of_birth,
+            undo_stack=undo_stack,
+        )
 
         self._timeline.selection_changed.connect(self._details.set_photo)
         self._timeline.order_changed.connect(self._on_order_changed)
@@ -130,37 +135,166 @@ class ReviewDialog(QDialog):
         )
         self._analyze_selected.clicked.connect(self._analyze_selected_photos)
 
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self._on_close)
+
+        undo_btn = QPushButton("Undo")
+        redo_btn = QPushButton("Redo")
+        if undo_stack is not None:
+            undo_action = undo_stack.createUndoAction(self, "Undo")
+            # Single binding only — duplicate Ctrl+Z entries become ambiguous.
+            undo_action.setShortcut(QKeySequence("Ctrl+Z"))
+            undo_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+            self.addAction(undo_action)
+            undo_btn.clicked.connect(undo_stack.undo)
+            undo_btn.setEnabled(undo_stack.canUndo())
+            undo_stack.canUndoChanged.connect(undo_btn.setEnabled)
+
+            redo_action = undo_stack.createRedoAction(self, "Redo")
+            redo_action.setShortcuts(
+                [
+                    QKeySequence("Ctrl+Shift+Z"),
+                    QKeySequence("Ctrl+Y"),
+                ]
+            )
+            redo_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+            self.addAction(redo_action)
+            redo_btn.clicked.connect(undo_stack.redo)
+            redo_btn.setEnabled(undo_stack.canRedo())
+            undo_stack.canRedoChanged.connect(redo_btn.setEnabled)
+        else:
+            undo_btn.setEnabled(False)
+            redo_btn.setEnabled(False)
+
+        # Two equal column shells: matching header height so Filter and
+        # "Photo details" share one baseline, and content tops align.
+        left_pane = self._build_column_pane(
+            header=self._timeline.header_bar,
+            body=self._timeline,
+        )
+        right_pane = self._build_column_pane(
+            header=self._build_details_header(),
+            body=self._details,
+        )
+
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         self._splitter.setChildrenCollapsible(False)
-        self._splitter.addWidget(self._timeline)
-        self._splitter.addWidget(self._details)
+        self._splitter.setHandleWidth(_LAYOUT_SPACING)
+        self._splitter.addWidget(left_pane)
+        self._splitter.addWidget(right_pane)
         self._splitter.setStretchFactor(0, 3)
         self._splitter.setStretchFactor(1, 2)
         self._splitter.setSizes([720, 400])
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(self.reject)
-        buttons.accepted.connect(self.accept)
-        close_btn = buttons.button(QDialogButtonBox.StandardButton.Close)
-        if close_btn is not None:
-            close_btn.clicked.connect(self._on_close)
-
         actions = QHBoxLayout()
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(_LAYOUT_SPACING)
         actions.addWidget(save_order)
         actions.addWidget(re_rank)
         actions.addWidget(self._analyze_selected)
+        actions.addWidget(undo_btn)
+        actions.addWidget(redo_btn)
         actions.addStretch(1)
-        actions.addWidget(buttons)
+        actions.addWidget(close_btn)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
-        layout.addWidget(hint)
+        layout.setContentsMargins(
+            _LAYOUT_MARGIN, _LAYOUT_MARGIN, _LAYOUT_MARGIN, _LAYOUT_MARGIN
+        )
+        layout.setSpacing(_LAYOUT_SPACING)
+        layout.addWidget(help_banner)
         layout.addWidget(self._splitter, stretch=1)
         layout.addLayout(actions)
 
         self._restore_state()
         self.reload()
+
+    @staticmethod
+    def _build_column_pane(*, header: QWidget, body: QWidget) -> QWidget:
+        """One splitter column: fixed header row + body, 8px gap."""
+        pane = QWidget()
+        pane_layout = QVBoxLayout(pane)
+        pane_layout.setContentsMargins(0, 0, 0, 0)
+        pane_layout.setSpacing(_LAYOUT_SPACING)
+        pane_layout.addWidget(header)
+        pane_layout.addWidget(body, stretch=1)
+        return pane
+
+    @staticmethod
+    def _build_details_header() -> QWidget:
+        header = QWidget()
+        header.setFixedHeight(ReviewTimeline.HEADER_HEIGHT)
+        header.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        row = QHBoxLayout(header)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(_LAYOUT_SPACING)
+        title = QLabel("Photo details")
+        title.setStyleSheet("font-weight: 600;")
+        title.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        row.addWidget(title)
+        row.addStretch(1)
+        return header
+
+    @staticmethod
+    def _build_help_banner() -> QWidget:
+        """Compact instructions + color legend for status chips."""
+        banner = QFrame()
+        banner.setObjectName("reviewHelpBanner")
+        banner.setStyleSheet(
+            "#reviewHelpBanner {"
+            "  background: #f3f4f6;"
+            "  border: 1px solid #d8dbe0;"
+            "  border-radius: 4px;"
+            "}"
+        )
+        banner.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
+
+        how_title = QLabel("How to review")
+        how_title.setStyleSheet("font-weight: 600; background: transparent;")
+
+        how_body = QLabel(
+            "1. Drag thumbnails to set order (youngest → oldest).\n"
+            "2. Select a photo to edit age, re-analyze, approve, exclude, "
+            "or mark as not the target.\n"
+            "3. Click the Photo details preview to view it larger."
+        )
+        how_body.setWordWrap(True)
+        how_body.setStyleSheet("background: transparent; color: #333;")
+
+        legend_label = QLabel("Status colors")
+        legend_label.setStyleSheet("font-weight: 600; background: transparent;")
+
+        legend_row = QHBoxLayout()
+        legend_row.setContentsMargins(0, 0, 0, 0)
+        legend_row.setSpacing(_LAYOUT_SPACING)
+        for color, label in STATUS_LEGEND:
+            chip = QLabel(label)
+            chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            chip.setStyleSheet(
+                f"QLabel {{"
+                f"  background: {color};"
+                f"  color: white;"
+                f"  padding: 3px 10px;"
+                f"  border-radius: 3px;"
+                f"}}"
+            )
+            legend_row.addWidget(chip)
+        legend_row.addStretch(1)
+
+        layout = QVBoxLayout(banner)
+        layout.setContentsMargins(_LAYOUT_MARGIN, _LAYOUT_MARGIN, _LAYOUT_MARGIN, _LAYOUT_MARGIN)
+        layout.setSpacing(6)
+        layout.addWidget(how_title)
+        layout.addWidget(how_body)
+        layout.addWidget(legend_label)
+        layout.addLayout(legend_row)
+        return banner
 
     def _restore_state(self) -> None:
         geometry = self._settings.value("review/geometry")
@@ -228,7 +362,9 @@ class ReviewDialog(QDialog):
             )
             return
 
-        for index, photo in enumerate(ordered):
+        before = copy_photos(ordered)
+        after = copy_photos(ordered)
+        for index, photo in enumerate(after):
             photo.manual_order = index
             photo.review_status = (
                 ReviewStatus.MANUALLY_CORRECTED
@@ -237,25 +373,60 @@ class ReviewDialog(QDialog):
                 else photo.review_status
             )
             photo.sort_score = float(index)
-            self._repo.upsert(photo)
-        self._dirty_order = False
+
+        def on_applied(_photos: list[PhotoRecord]) -> None:
+            self._dirty_order = False
+            self.reload()
+
+        if self._undo_stack is not None:
+            self._undo_stack.push(
+                BulkPhotosSnapshotCommand(
+                    self._project_id,
+                    before,
+                    after,
+                    "Save custom order",
+                    on_applied=on_applied,
+                )
+            )
+        else:
+            for photo in after:
+                self._repo.upsert(photo)
+            on_applied(after)
+
         QMessageBox.information(
             self,
             "Order Saved",
-            f"Saved custom order for {len(ordered)} photos.\n"
+            f"Saved custom order for {len(after)} photos.\n"
             "Export will use this order.",
         )
-        self.reload()
 
     def _rerank_by_ages(self) -> None:
         photos = self._repo.list_photos()
-        for photo in photos:
+        before = copy_photos(photos)
+        after = copy_photos(photos)
+        for photo in after:
             photo.manual_order = None
-        ranked = rank_photo_records(photos, date_of_birth=self._date_of_birth)
-        for photo in ranked:
-            self._repo.upsert(photo)
-        self._dirty_order = False
-        self.reload()
+        after = rank_photo_records(after, date_of_birth=self._date_of_birth)
+
+        def on_applied(_photos: list[PhotoRecord]) -> None:
+            self._dirty_order = False
+            self.reload()
+
+        if self._undo_stack is not None:
+            self._undo_stack.push(
+                BulkPhotosSnapshotCommand(
+                    self._project_id,
+                    before,
+                    after,
+                    "Re-rank by ages",
+                    on_applied=on_applied,
+                )
+            )
+        else:
+            for photo in after:
+                self._repo.upsert(photo)
+            on_applied(after)
+
         QMessageBox.information(
             self,
             "Re-ranked",
@@ -299,17 +470,30 @@ class ReviewDialog(QDialog):
             )
             return
 
-        label = selected[0].original_path.name
-        if len(photo_ids) == 1:
-            message = f"Re-analyzing {label}…"
-        else:
-            message = f"Re-analyzing {len(photo_ids)} photos…"
-
-        progress = QProgressDialog(message, None, 0, len(photo_ids), self)
+        total = len(photo_ids)
+        progress = QProgressDialog(self)
         progress.setWindowTitle("Analyze Photo")
         progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setCancelButton(None)
         progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setMinimumWidth(520)
+        progress.setMaximumWidth(560)
+        progress.setMinimumHeight(140)
+        progress.setRange(0, total)
         progress.setValue(0)
+        progress.setLabelText(self._reanalyze_progress_text(0, total, "Starting…"))
+        label = progress.findChild(QLabel)
+        if label is not None:
+            label.setMinimumWidth(480)
+            label.setMaximumWidth(520)
+            label.setWordWrap(True)
+            label.setAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            )
+        progress.show()
+        progress.resize(520, 150)
         self._progress = progress
 
         thread = QThread(self)
@@ -334,17 +518,47 @@ class ReviewDialog(QDialog):
         self._worker = worker
         thread.start()
 
+    @staticmethod
+    def _short_progress_name(message: str, max_chars: int = 52) -> str:
+        """Keep progress text stable-width; prefer the trailing filename."""
+        text = (message or "").strip()
+        if text.lower().startswith("re-analyzing"):
+            # "Re-analyzing… filename" or "Re-analyzing filename"
+            parts = text.replace("…", " ").split(None, 1)
+            if len(parts) > 1:
+                text = parts[1]
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 1] + "…"
+
+    @classmethod
+    def _reanalyze_progress_text(
+        cls,
+        current: int,
+        total: int,
+        message: str,
+    ) -> str:
+        total = max(total, 1)
+        current = max(0, min(current, total))
+        detail = cls._short_progress_name(message)
+        return f"{current}/{total} in progress\n{detail}"
+
     def _on_single_progress(self, current: int, total: int, message: str) -> None:
         if self._progress is None:
             return
         self._progress.setMaximum(max(total, 1))
-        self._progress.setValue(current)
-        self._progress.setLabelText(message)
+        # Show completed count on the bar; label shows current/total in progress.
+        self._progress.setValue(max(0, current - 1) if current < total else current)
+        self._progress.setLabelText(
+            self._reanalyze_progress_text(current, total, message)
+        )
 
     def _on_single_finished(self, _updated: list) -> None:
         if self._progress is not None:
             self._progress.close()
             self._progress = None
+        if self._undo_stack is not None:
+            self._undo_stack.clear()
         self.reload()
         # Reselect first updated photo if possible.
         selected = self._timeline.selected_photos()
@@ -360,6 +574,8 @@ class ReviewDialog(QDialog):
         if self._progress is not None:
             self._progress.close()
             self._progress = None
+        if self._undo_stack is not None:
+            self._undo_stack.clear()
         QMessageBox.critical(self, "Analysis Failed", message)
 
     def _on_single_thread_finished(self) -> None:

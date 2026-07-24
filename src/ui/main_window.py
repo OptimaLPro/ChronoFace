@@ -2,29 +2,47 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSettings, QSize, Qt, QThread
-from PySide6.QtGui import QAction, QCloseEvent
+from pathlib import Path
+
+from PySide6.QtCore import QPoint, QSettings, QSize, Qt, QThread
+from PySide6.QtGui import QAction, QCloseEvent, QColor, QKeySequence, QUndoStack
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
     QSplitter,
     QStackedWidget,
     QStatusBar,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from src.commands import (
+    PhotoSnapshotCommand,
+    ProjectConfigCommand,
+    copy_photo,
+    copy_project,
+)
 from src.database.photo_repository import PhotoRepository
 from src.database.repository import ProjectRepository
-from src.domain.models import DateReliability, ProjectConfig, ScanSummary
+from src.domain.models import (
+    DateReliability,
+    LifeStage,
+    ProjectConfig,
+    ReviewStatus,
+    ScanSummary,
+)
 from src.export.file_exporter import ExportResult, classify_photo
 from src.ui.export_dialog import ExportDialog
+from src.ui.photo_lightbox import open_photo_lightbox
 from src.ui.processing_view import ProcessingView
 from src.ui.project_setup_dialog import ProjectSetupDialog
 from src.ui.reference_selector import LIFE_STAGE_LABELS
@@ -33,6 +51,7 @@ from src.ui.settings_dialog import SettingsDialog
 from src.ui.welcome_view import WelcomeView
 from src.settings.app_settings import load_settings
 from src.utils.logging import get_logger
+from src.utils.paths import reveal_in_file_manager
 from src.workers.analysis_worker import AnalysisWorker
 from src.workers.export_worker import ExportWorker
 from src.workers.face_pipeline import project_needs_face_reprocess
@@ -47,6 +66,142 @@ PRIVACY_TEXT = (
 
 _PAGE_WELCOME = 0
 _PAGE_WORKSPACE = 1
+_PATH_ROLE = Qt.ItemDataRole.UserRole
+_PHOTO_ID_ROLE = Qt.ItemDataRole.UserRole + 1
+
+_BUTTON_STYLE = (
+    "QPushButton {"
+    "  font-weight: 600; padding: 8px 14px;"
+    "  background: #2a2f38; color: #ffffff; border: 1px solid #1f242c;"
+    "  border-radius: 6px;"
+    "}"
+    "QPushButton:hover { background: #3a414d; border-color: #2a2f38; }"
+    "QPushButton:pressed { background: #1f242c; }"
+    "QPushButton:disabled {"
+    "  color: #9aa1ab; background: #e8eaee; border-color: #d5d8de;"
+    "}"
+)
+_ANALYZE_BUTTON_STYLE = (
+    "QPushButton {"
+    "  font-weight: 600; padding: 8px 16px;"
+    "  color: #ffffff; border: none; border-radius: 6px;"
+    "  background: qlineargradient("
+    "    x1:0, y1:0, x2:1, y2:1,"
+    "    stop:0 #3b82f6, stop:0.55 #6366f1, stop:1 #a855f7"
+    "  );"
+    "}"
+    "QPushButton:hover {"
+    "  background: qlineargradient("
+    "    x1:0, y1:0, x2:1, y2:1,"
+    "    stop:0 #2563eb, stop:0.55 #4f46e5, stop:1 #9333ea"
+    "  );"
+    "}"
+    "QPushButton:pressed {"
+    "  background: qlineargradient("
+    "    x1:0, y1:0, x2:1, y2:1,"
+    "    stop:0 #1d4ed8, stop:0.55 #4338ca, stop:1 #7e22ce"
+    "  );"
+    "}"
+    "QPushButton:disabled {"
+    "  color: #c4c9d4; background: #e8eaee; border: 1px solid #d5d8de;"
+    "}"
+)
+_PHOTO_TABLE_STYLE = (
+    "QTableWidget {"
+    "  background: #ffffff; alternate-background-color: #f8fafc;"
+    "  border: 1px solid #e2e8f0; border-radius: 6px;"
+    "  gridline-color: #edf0f4;"
+    "  selection-background-color: #e8eefc; selection-color: #1e293b;"
+    "  font-size: 12px;"
+    "}"
+    "QTableWidget::item { padding: 4px 8px; }"
+    "QHeaderView::section {"
+    "  background: #f7f9fc; color: #475569; font-weight: 600;"
+    "  border: none; border-bottom: 1px solid #e2e8f0;"
+    "  border-right: 1px solid #edf0f4; padding: 6px 8px;"
+    "  cursor: pointer;"
+    "}"
+    "QHeaderView::section:hover { background: #eef2f7; color: #1e293b; }"
+    "QHeaderView::section:last { border-right: none; }"
+)
+_PHOTO_TABLE_COLUMNS = ("File", "Age", "Date", "Match")
+_REFERENCE_TABLE_COLUMNS = ("#", "File", "Life stage", "Status")
+# Soft status fills (~12–18% opacity) plus muted text for Match / Date cells.
+_STATUS_BG = {
+    "match": QColor(22, 163, 74, 40),
+    "low": QColor(217, 119, 6, 38),
+    "no match": QColor(225, 29, 72, 36),
+    "no face": QColor(100, 116, 139, 36),
+    "pending": QColor(59, 130, 246, 34),
+    "error": QColor(239, 68, 68, 40),
+    "ok": QColor(22, 163, 74, 32),
+    "missing": QColor(239, 68, 68, 40),
+    "EXIF": QColor(22, 163, 74, 32),
+    "weak": QColor(217, 119, 6, 32),
+    "none": QColor(148, 163, 184, 36),
+}
+_STATUS_FG = {
+    "match": QColor(21, 128, 61),
+    "low": QColor(180, 83, 9),
+    "no match": QColor(190, 18, 60),
+    "no face": QColor(71, 85, 105),
+    "pending": QColor(37, 99, 235),
+    "error": QColor(185, 28, 28),
+    "ok": QColor(21, 128, 61),
+    "missing": QColor(185, 28, 28),
+    "EXIF": QColor(21, 128, 61),
+    "weak": QColor(180, 83, 9),
+    "none": QColor(100, 116, 139),
+}
+
+
+def _apply_status_tint(item: QTableWidgetItem, kind: str) -> None:
+    bg = _STATUS_BG.get(kind)
+    fg = _STATUS_FG.get(kind)
+    if bg is not None:
+        item.setBackground(bg)
+    if fg is not None:
+        item.setForeground(fg)
+
+
+def _match_status_kind(identity: str) -> str:
+    if identity.startswith("match"):
+        return "match"
+    if identity.startswith("low"):
+        return "low"
+    if identity.startswith("no match"):
+        return "no match"
+    if identity == "no face":
+        return "no face"
+    return "pending"
+
+
+def _configure_data_table(
+    table: QTableWidget,
+    columns: tuple[str, ...],
+    widths: tuple[int, ...],
+) -> None:
+    table.setColumnCount(len(columns))
+    table.setHorizontalHeaderLabels(list(columns))
+    table.setStyleSheet(_PHOTO_TABLE_STYLE)
+    table.setAlternatingRowColors(True)
+    table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+    table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+    table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+    table.setShowGrid(False)
+    table.setWordWrap(False)
+    table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+    table.verticalHeader().setVisible(False)
+    header = table.horizontalHeader()
+    header.setSectionsClickable(True)
+    header.setHighlightSections(True)
+    header.setSortIndicatorShown(True)
+    header.setCursor(Qt.CursorShape.PointingHandCursor)
+    header.setStretchLastSection(True)
+    header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+    header.setMinimumSectionSize(48)
+    for index, width in enumerate(widths):
+        table.setColumnWidth(index, width)
 
 
 class MainWindow(QMainWindow):
@@ -65,6 +220,9 @@ class MainWindow(QMainWindow):
         self._export_thread: QThread | None = None
         self._export_worker: ExportWorker | None = None
         self._settings = QSettings("ChronoFace", "ChronoFace")
+        self._undo_stack = QUndoStack(self)
+        self._undo_stack.setUndoLimit(100)
+        self._undo_stack.indexChanged.connect(self._on_undo_index_changed)
 
         self._build_menu()
         self._build_ui()
@@ -86,9 +244,14 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self.open_recent_project)
         file_menu.addAction(open_action)
 
-        edit_action = QAction("Edit Project…", self)
-        edit_action.triggered.connect(self.edit_project)
-        file_menu.addAction(edit_action)
+        edit_project_action = QAction("Edit Project…", self)
+        edit_project_action.triggered.connect(self.edit_project)
+        file_menu.addAction(edit_project_action)
+
+        close_action = QAction("Close Project", self)
+        close_action.setShortcut("Ctrl+W")
+        close_action.triggered.connect(self.close_project)
+        file_menu.addAction(close_action)
 
         file_menu.addSeparator()
 
@@ -123,6 +286,24 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
+        edit_menu = self.menuBar().addMenu("&Edit")
+        self._undo_action = self._undo_stack.createUndoAction(self, "Undo")
+        # Use a single binding — listing StandardKey.Undo and "Ctrl+Z" together
+        # makes Qt treat Ctrl+Z as ambiguous, so the keyboard shortcut never fires.
+        self._undo_action.setShortcut(QKeySequence("Ctrl+Z"))
+        self._undo_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        edit_menu.addAction(self._undo_action)
+
+        self._redo_action = self._undo_stack.createRedoAction(self, "Redo")
+        self._redo_action.setShortcuts(
+            [
+                QKeySequence("Ctrl+Shift+Z"),
+                QKeySequence("Ctrl+Y"),
+            ]
+        )
+        self._redo_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        edit_menu.addAction(self._redo_action)
+
         help_menu = self.menuBar().addMenu("&Help")
         privacy_action = QAction("Privacy", self)
         privacy_action.triggered.connect(self.show_privacy)
@@ -139,13 +320,6 @@ class MainWindow(QMainWindow):
         settings_menu.addAction(open_settings)
 
     def _build_ui(self) -> None:
-        self._privacy_banner = QLabel(PRIVACY_TEXT)
-        self._privacy_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._privacy_banner.setStyleSheet(
-            "QLabel { background: #eef6ee; border: 1px solid #b7d7b7; "
-            "padding: 10px; color: #1f4d1f; font-weight: 600; }"
-        )
-
         self._welcome_view = WelcomeView()
         self._welcome_view.create_project_requested.connect(self.new_project)
         self._welcome_view.open_project_requested.connect(self._open_project_by_id)
@@ -153,17 +327,62 @@ class MainWindow(QMainWindow):
         self._title_label = QLabel("No project open")
         self._title_label.setStyleSheet("font-size: 20px; font-weight: 600;")
 
+        self._edit_button = QPushButton("Edit Project")
+        self._edit_button.setEnabled(False)
+        self._edit_button.setToolTip("Change folders, date of birth, or reference photos")
+        self._edit_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._edit_button.setStyleSheet(_BUTTON_STYLE)
+        self._edit_button.clicked.connect(self.edit_project)
+
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(8)
+        title_row.addWidget(self._title_label, stretch=1)
+        title_row.addWidget(
+            self._edit_button,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+
         self._summary_label = QLabel(
             "Create a new project to select an input folder, output folder, "
             "and reference photos of the person to track."
         )
         self._summary_label.setWordWrap(True)
+        self._summary_label.setStyleSheet("color: #444; font-size: 12px;")
 
         self._scan_stats_label = QLabel("No photos scanned yet.")
         self._scan_stats_label.setWordWrap(True)
+        self._scan_stats_label.setStyleSheet(
+            "QLabel {"
+            "  background: #f7f9fc; border: 1px solid #e2e8f0;"
+            "  border-radius: 6px; padding: 10px 12px; color: #334;"
+            "  font-size: 12px;"
+            "}"
+        )
 
-        self._reference_list = QListWidget()
-        self._photo_list = QListWidget()
+        self._reference_list = QTableWidget()
+        _configure_data_table(
+            self._reference_list,
+            _REFERENCE_TABLE_COLUMNS,
+            (48, 280, 120, 90),
+        )
+        self._reference_list.cellDoubleClicked.connect(
+            self._on_reference_double_clicked
+        )
+        self._reference_list.customContextMenuRequested.connect(
+            self._on_reference_context_menu
+        )
+
+        self._photo_list = QTableWidget()
+        _configure_data_table(
+            self._photo_list,
+            _PHOTO_TABLE_COLUMNS,
+            (320, 110, 150, 110),
+        )
+        self._photo_list.cellDoubleClicked.connect(self._on_photo_double_clicked)
+        self._photo_list.customContextMenuRequested.connect(
+            self._on_photo_context_menu
+        )
 
         self._processing_view = ProcessingView()
         self._processing_view.cancel_requested.connect(self._cancel_scan)
@@ -175,21 +394,27 @@ class MainWindow(QMainWindow):
         )
         self._phase_note.setWordWrap(True)
         self._phase_note.setStyleSheet(
-            "QLabel { background: #f7f7f7; border: 1px solid #ddd; padding: 12px; }"
+            "QLabel {"
+            "  background: #f7f9fc; border: 1px solid #e2e8f0;"
+            "  border-radius: 6px; padding: 12px; color: #334;"
+            "}"
         )
 
-        new_button = QPushButton("New Project…")
-        new_button.clicked.connect(self.new_project)
-        open_button = QPushButton("Open Recent…")
-        open_button.clicked.connect(self.open_recent_project)
-        edit_button = QPushButton("Edit Project…")
-        edit_button.clicked.connect(self.edit_project)
+        self._close_button = QPushButton("Close Project")
+        self._close_button.setEnabled(False)
+        self._close_button.setToolTip(
+            "Save progress and return to the welcome screen"
+        )
+        self._close_button.setStyleSheet(_BUTTON_STYLE)
+        self._close_button.clicked.connect(self.close_project)
 
-        self._analyze_button = QPushButton("Analyze Photos")
+        self._analyze_button = QPushButton("✨ Analyze Photos")
         self._analyze_button.setEnabled(False)
         self._analyze_button.setToolTip(
             "Scan metadata, detect faces, and match the target person locally"
         )
+        self._analyze_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._analyze_button.setStyleSheet(_ANALYZE_BUTTON_STYLE)
         self._analyze_button.clicked.connect(self.start_metadata_scan)
 
         self._export_button = QPushButton("Export to Folder")
@@ -197,6 +422,7 @@ class MainWindow(QMainWindow):
         self._export_button.setToolTip(
             "Copy numbered photos into the output folder in youngest-to-oldest order"
         )
+        self._export_button.setStyleSheet(_BUTTON_STYLE)
         self._export_button.clicked.connect(self.start_export)
 
         self._review_button = QPushButton("Review Results")
@@ -204,12 +430,12 @@ class MainWindow(QMainWindow):
         self._review_button.setToolTip(
             "Open the thumbnail timeline to fix order and ages"
         )
+        self._review_button.setStyleSheet(_BUTTON_STYLE)
         self._review_button.clicked.connect(self.open_review)
 
         button_row = QHBoxLayout()
-        button_row.addWidget(new_button)
-        button_row.addWidget(open_button)
-        button_row.addWidget(edit_button)
+        button_row.setSpacing(8)
+        button_row.addWidget(self._close_button)
         button_row.addStretch(1)
         button_row.addWidget(self._analyze_button)
         button_row.addWidget(self._review_button)
@@ -224,16 +450,22 @@ class MainWindow(QMainWindow):
         self._reference_list.setMinimumHeight(60)
         self._photo_list.setMinimumHeight(120)
 
+        ref_heading = QLabel("Reference photos")
+        ref_heading.setStyleSheet("font-weight: 600; margin-top: 4px;")
+        scan_heading = QLabel("Scanned photos")
+        scan_heading.setStyleSheet("font-weight: 600; margin-top: 4px;")
+
         left = QWidget()
         left.setMinimumWidth(360)
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(8, 8, 8, 8)
-        left_layout.addWidget(self._title_label)
+        left_layout.setSpacing(8)
+        left_layout.addLayout(title_row)
         left_layout.addWidget(self._summary_label)
         left_layout.addWidget(self._scan_stats_label)
-        left_layout.addWidget(QLabel("Reference photos"))
+        left_layout.addWidget(ref_heading)
         left_layout.addWidget(self._reference_list, stretch=1)
-        left_layout.addWidget(QLabel("Scanned photos"))
+        left_layout.addWidget(scan_heading)
         left_layout.addWidget(self._photo_list, stretch=2)
         left_layout.addLayout(button_row)
 
@@ -241,6 +473,7 @@ class MainWindow(QMainWindow):
         right.setMinimumWidth(300)
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(8, 8, 8, 8)
+        right_layout.setSpacing(8)
         right_layout.addWidget(self._phase_note)
         right_layout.addWidget(self._processing_view, stretch=1)
 
@@ -266,7 +499,6 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
-        layout.addWidget(self._privacy_banner)
         layout.addWidget(self._stack, stretch=1)
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
@@ -317,19 +549,79 @@ class MainWindow(QMainWindow):
                 "Create or open a project before editing.",
             )
             return
+        before = copy_project(self._project)
         dialog = ProjectSetupDialog(self, existing=self._project)
         if dialog.exec() != ProjectSetupDialog.DialogCode.Accepted:
             return
         config = dialog.project_config()
         if config is None:
             return
+        after = copy_project(config)
         try:
-            saved = self._repository.update(config)
+            self._undo_stack.push(
+                ProjectConfigCommand(
+                    before,
+                    after,
+                    "Edit project",
+                    repository=self._repository,
+                    on_applied=self._on_project_config_applied,
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to update project")
             QMessageBox.critical(self, "Could Not Save Project", str(exc))
             return
-        self._set_project(saved)
+
+    def close_project(self) -> None:
+        """Keep saved progress and return to the welcome screen."""
+        if self._project is None:
+            QMessageBox.information(
+                self,
+                "No Project Open",
+                "There is no project to close.",
+            )
+            return
+        if self._is_busy():
+            QMessageBox.warning(
+                self,
+                "Busy",
+                "Wait for the current analysis or export to finish before closing.",
+            )
+            return
+
+        name = self._project.name
+        project_id = self._project.id
+        # Analysis, review, and project settings already write to SQLite as
+        # they happen; refresh the recent index so this project stays listed.
+        try:
+            self._repository.load(project_id)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Could not refresh recent index while closing project %s",
+                project_id,
+            )
+
+        self._clear_project()
+        self.statusBar().showMessage(
+            f"Closed project: {name} — all progress is saved"
+        )
+        logger.info("Closed project %s", project_id)
+
+    def _clear_project(self) -> None:
+        self._undo_stack.clear()
+        self._project = None
+        self._title_label.setText("No project open")
+        self._title_label.setToolTip("")
+        self._summary_label.setText(
+            "Create a new project to select an input folder, output folder, "
+            "and reference photos of the person to track."
+        )
+        self._scan_stats_label.setText("No photos scanned yet.")
+        self._reference_list.setRowCount(0)
+        self._photo_list.setRowCount(0)
+        self._processing_view.reset()
+        self._set_action_buttons_enabled(True)
+        self._show_welcome()
 
     def open_recent_project(self) -> None:
         if self._is_busy():
@@ -374,46 +666,110 @@ class MainWindow(QMainWindow):
             return
         self._set_project(config)
 
-    def _set_project(self, config: ProjectConfig) -> None:
+    def _set_project(self, config: ProjectConfig, *, reset_undo: bool = True) -> None:
+        if reset_undo:
+            self._undo_stack.clear()
+        self._apply_project_ui(config)
+
+    def _on_project_config_applied(self, config: ProjectConfig) -> None:
+        self._apply_project_ui(config)
+
+    def _apply_project_ui(self, config: ProjectConfig) -> None:
         self._project = config
         self._title_label.setText(config.name)
+        self._title_label.setToolTip(f"Project ID: {config.id}")
 
         dob_text = (
             config.date_of_birth.isoformat()
             if config.date_of_birth is not None
             else "Not set"
         )
+        subfolders_text = (
+            "including subfolders"
+            if config.include_subfolders
+            else "top-level folder only"
+        )
         self._summary_label.setText(
+            f"Input:  {config.input_folder} ({subfolders_text})\n"
+            f"Output: {config.output_folder}\n"
+            f"Date of birth: {dob_text}  ·  "
+            f"Reference photos: {len(config.reference_photos)}"
+        )
+        self._summary_label.setToolTip(
             f"Input folder:\n{config.input_folder}\n\n"
             f"Output folder:\n{config.output_folder}\n\n"
-            f"Date of birth: {dob_text}\n"
-            f"Reference photos: {len(config.reference_photos)}\n"
             f"Project ID: {config.id}"
         )
 
-        self._reference_list.clear()
-        for index, reference in enumerate(config.reference_photos):
-            stage = LIFE_STAGE_LABELS.get(
-                reference.life_stage, reference.life_stage.value
-            )
-            item = QListWidgetItem(
-                f"{index + 1}. {reference.file_path.name} [{stage}]"
-            )
-            item.setToolTip(str(reference.file_path))
-            if not reference.file_path.is_file():
-                item.setText(item.text() + "  (missing file)")
-            self._reference_list.addItem(item)
-
+        self._refresh_reference_list()
         self._analyze_button.setEnabled(True)
         self._export_button.setEnabled(True)
         self._review_button.setEnabled(True)
+        self._close_button.setEnabled(True)
+        self._edit_button.setEnabled(True)
         self._refresh_photo_list()
         self._stack.setCurrentIndex(_PAGE_WORKSPACE)
         self.statusBar().showMessage(f"Opened project: {config.name}")
         logger.info("UI loaded project %s", config.id)
 
+    def _on_undo_index_changed(self, _index: int) -> None:
+        if self._undo_stack.canUndo():
+            self.statusBar().showMessage(
+                f"Undo available: {self._undo_stack.undoText()}"
+            )
+        elif self._undo_stack.canRedo():
+            self.statusBar().showMessage(
+                f"Redo available: {self._undo_stack.redoText()}"
+            )
+
+    def _refresh_reference_list(self) -> None:
+        self._reference_list.setRowCount(0)
+        if self._project is None:
+            return
+
+        references = self._project.reference_photos
+        self._reference_list.setSortingEnabled(False)
+        self._reference_list.setRowCount(len(references))
+        for row, reference in enumerate(references):
+            path = Path(reference.file_path)
+            path_text = str(path)
+            exists = path.is_file()
+            stage = (
+                LIFE_STAGE_LABELS.get(reference.life_stage, reference.life_stage.value)
+                if reference.life_stage != LifeStage.UNKNOWN
+                else "—"
+            )
+            status_kind = "ok" if exists else "missing"
+            status_text = "OK" if exists else "missing"
+
+            index_item = QTableWidgetItem(str(row + 1))
+            index_item.setData(_PATH_ROLE, path_text)
+            index_item.setTextAlignment(
+                int(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            )
+
+            file_item = QTableWidgetItem(path.name)
+            file_item.setToolTip(path_text)
+            file_item.setData(_PATH_ROLE, path_text)
+
+            stage_item = QTableWidgetItem(stage)
+            stage_item.setData(_PATH_ROLE, path_text)
+
+            status_item = QTableWidgetItem(status_text)
+            status_item.setData(_PATH_ROLE, path_text)
+            _apply_status_tint(status_item, status_kind)
+            if not exists:
+                _apply_status_tint(file_item, "missing")
+
+            self._reference_list.setItem(row, 0, index_item)
+            self._reference_list.setItem(row, 1, file_item)
+            self._reference_list.setItem(row, 2, stage_item)
+            self._reference_list.setItem(row, 3, status_item)
+
+        self._reference_list.setSortingEnabled(True)
+
     def _refresh_photo_list(self) -> None:
-        self._photo_list.clear()
+        self._photo_list.setRowCount(0)
         if self._project is None:
             self._scan_stats_label.setText("No photos scanned yet.")
             return
@@ -432,8 +788,15 @@ class MainWindow(QMainWindow):
             f"No date: {stats['no_date']}"
         )
 
-        photos = photo_repo.list_photos()
-        for photo in photos[:500]:
+        photos = [
+            photo
+            for photo in photo_repo.list_photos()
+            if photo.review_status != ReviewStatus.EXCLUDED
+        ]
+        visible = photos[:500]
+        self._photo_list.setRowCount(len(visible) + (1 if len(photos) > 500 else 0))
+        self._photo_list.setSortingEnabled(False)
+        for row, photo in enumerate(visible):
             date_text = (
                 photo.capture_date.strftime("%Y-%m-%d")
                 if photo.capture_date
@@ -447,7 +810,11 @@ class MainWindow(QMainWindow):
                 reliability = "none"
 
             if photo.target_found:
-                identity = f"match {photo.identity_score:.2f}" if photo.identity_score is not None else "match"
+                identity = (
+                    f"match {photo.identity_score:.2f}"
+                    if photo.identity_score is not None
+                    else "match"
+                )
             elif photo.review_status.value == "no_face":
                 identity = "no face"
             elif photo.review_status.value == "low_confidence":
@@ -465,29 +832,294 @@ class MainWindow(QMainWindow):
             else:
                 identity = "pending"
 
-            if photo.age_from_dob is not None and photo.date_reliability.value == "reliable_exif":
-                age_text = f"age {photo.age_from_dob:.1f} (DOB+EXIF)"
+            if (
+                photo.age_from_dob is not None
+                and photo.date_reliability.value == "reliable_exif"
+            ):
+                age_text = f"{photo.age_from_dob:.1f} (DOB+EXIF)"
             elif photo.estimated_age is not None:
-                age_text = f"age ~{photo.estimated_age:.0f} (AI)"
+                age_text = f"~{photo.estimated_age:.0f} (AI)"
             elif photo.sort_score is not None:
                 age_text = f"score {photo.sort_score:.1f}"
             else:
-                age_text = "age ?"
+                age_text = "?"
 
-            label = (
-                f"{photo.original_path.name}  |  {age_text}  |  "
-                f"{date_text} ({reliability})  |  {identity}"
-            )
+            file_name = photo.original_path.name
             if photo.error_message:
-                label += "  [error]"
-            item = QListWidgetItem(label)
-            item.setToolTip(str(photo.original_path))
-            self._photo_list.addItem(item)
+                file_name += "  [error]"
+            path_text = str(photo.original_path)
+
+            file_item = QTableWidgetItem(file_name)
+            file_item.setToolTip(path_text)
+            file_item.setData(_PATH_ROLE, path_text)
+            file_item.setData(_PHOTO_ID_ROLE, photo.id)
+            if photo.error_message:
+                _apply_status_tint(file_item, "error")
+
+            age_item = QTableWidgetItem(age_text)
+            age_item.setData(_PATH_ROLE, path_text)
+            age_item.setData(_PHOTO_ID_ROLE, photo.id)
+
+            date_item = QTableWidgetItem(f"{date_text} ({reliability})")
+            date_item.setData(_PATH_ROLE, path_text)
+            date_item.setData(_PHOTO_ID_ROLE, photo.id)
+            _apply_status_tint(date_item, reliability)
+
+            match_item = QTableWidgetItem(identity)
+            match_item.setData(_PATH_ROLE, path_text)
+            match_item.setData(_PHOTO_ID_ROLE, photo.id)
+            _apply_status_tint(match_item, _match_status_kind(identity))
+
+            self._photo_list.setItem(row, 0, file_item)
+            self._photo_list.setItem(row, 1, age_item)
+            self._photo_list.setItem(row, 2, date_item)
+            self._photo_list.setItem(row, 3, match_item)
 
         if len(photos) > 500:
-            self._photo_list.addItem(
-                QListWidgetItem(f"… and {len(photos) - 500} more (not listed)")
+            overflow = QTableWidgetItem(
+                f"… and {len(photos) - 500} more (not listed)"
             )
+            overflow.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self._photo_list.setItem(len(visible), 0, overflow)
+            self._photo_list.setSpan(len(visible), 0, 1, len(_PHOTO_TABLE_COLUMNS))
+
+        self._photo_list.setSortingEnabled(True)
+
+    def _row_path(self, table: QTableWidget, row: int) -> Path | None:
+        item = table.item(row, 0)
+        if item is None:
+            return None
+        raw = item.data(_PATH_ROLE)
+        if not raw:
+            return None
+        return Path(str(raw))
+
+    def _row_photo_id(self, row: int) -> int | None:
+        item = self._photo_list.item(row, 0)
+        if item is None:
+            return None
+        value = item.data(_PHOTO_ID_ROLE)
+        return int(value) if value is not None else None
+
+    def _preview_path(self, path: Path | None) -> None:
+        if path is None:
+            QMessageBox.information(
+                self,
+                "Photo Unavailable",
+                "This photo path is missing, so it cannot be previewed.",
+            )
+            return
+        if not path.is_file():
+            QMessageBox.warning(
+                self,
+                "Photo Missing",
+                f"The file could not be found:\n{path}",
+            )
+            return
+        open_photo_lightbox(self, path)
+
+    def _open_path_in_explorer(self, path: Path | None) -> None:
+        if path is None:
+            return
+        try:
+            reveal_in_file_manager(path)
+        except FileNotFoundError:
+            QMessageBox.warning(
+                self,
+                "Photo Missing",
+                f"The file could not be found:\n{path}",
+            )
+        except OSError as exc:
+            QMessageBox.warning(self, "Could Not Open Folder", str(exc))
+
+    def _on_photo_double_clicked(self, row: int, _column: int) -> None:
+        self._preview_path(self._row_path(self._photo_list, row))
+
+    def _on_reference_double_clicked(self, row: int, _column: int) -> None:
+        self._preview_path(self._row_path(self._reference_list, row))
+
+    def _on_photo_context_menu(self, pos: QPoint) -> None:
+        index = self._photo_list.indexAt(pos)
+        if not index.isValid():
+            return
+        row = index.row()
+        path = self._row_path(self._photo_list, row)
+        if path is None:
+            return
+        self._photo_list.selectRow(row)
+
+        menu = QMenu(self)
+        preview_action = menu.addAction("Preview photo")
+        explorer_action = menu.addAction("Open in explorer")
+        menu.addSeparator()
+        remove_action = menu.addAction("Remove from project")
+        chosen = menu.exec(self._photo_list.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen == preview_action:
+            self._preview_path(path)
+        elif chosen == explorer_action:
+            self._open_path_in_explorer(path)
+        elif chosen == remove_action:
+            self._remove_scanned_photo(row)
+
+    def _on_reference_context_menu(self, pos: QPoint) -> None:
+        index = self._reference_list.indexAt(pos)
+        if not index.isValid():
+            return
+        row = index.row()
+        path = self._row_path(self._reference_list, row)
+        if path is None:
+            return
+        self._reference_list.selectRow(row)
+
+        menu = QMenu(self)
+        preview_action = menu.addAction("Preview photo")
+        explorer_action = menu.addAction("Open in explorer")
+        menu.addSeparator()
+        remove_action = menu.addAction("Remove from project")
+        chosen = menu.exec(self._reference_list.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen == preview_action:
+            self._preview_path(path)
+        elif chosen == explorer_action:
+            self._open_path_in_explorer(path)
+        elif chosen == remove_action:
+            self._remove_reference_photo(path)
+
+    def _remove_scanned_photo(self, row: int) -> None:
+        if self._project is None or self._is_busy():
+            if self._is_busy():
+                QMessageBox.warning(
+                    self, "Busy", "Wait for the current task to finish."
+                )
+            return
+
+        path = self._row_path(self._photo_list, row)
+        photo_id = self._row_photo_id(row)
+        if path is None:
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Remove from Project",
+            (
+                f"Remove this photo from the project?\n\n{path.name}\n\n"
+                "The original file stays on disk. It will not be exported."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        photo_repo = PhotoRepository(self._project.id)
+        photo = None
+        if photo_id is not None:
+            photo = next(
+                (item for item in photo_repo.list_photos() if item.id == photo_id),
+                None,
+            )
+        if photo is None:
+            photo = next(
+                (
+                    item
+                    for item in photo_repo.list_photos()
+                    if Path(item.original_path).resolve() == path.resolve()
+                ),
+                None,
+            )
+        if photo is None:
+            QMessageBox.warning(
+                self,
+                "Photo Not Found",
+                "Could not find that photo in the project database.",
+            )
+            return
+
+        before = copy_photo(photo)
+        after = copy_photo(photo)
+        after.review_status = ReviewStatus.EXCLUDED
+        self._undo_stack.push(
+            PhotoSnapshotCommand(
+                self._project.id,
+                before,
+                after,
+                "Remove from project",
+                on_applied=lambda _p: self._refresh_photo_list(),
+            )
+        )
+        self.statusBar().showMessage(
+            f"Removed from project (file kept): {path.name}"
+        )
+
+    def _remove_reference_photo(self, path: Path) -> None:
+        if self._project is None or self._is_busy():
+            if self._is_busy():
+                QMessageBox.warning(
+                    self, "Busy", "Wait for the current task to finish."
+                )
+            return
+
+        references = self._project.reference_photos
+        if len(references) <= 1:
+            QMessageBox.warning(
+                self,
+                "Cannot Remove",
+                "A project needs at least one reference photo.",
+            )
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Remove from Project",
+            (
+                f"Remove this reference photo from the project?\n\n{path.name}\n\n"
+                "The original file stays on disk."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        target = path.resolve()
+        before = copy_project(self._project)
+        after = copy_project(self._project)
+        after.reference_photos = [
+            reference
+            for reference in after.reference_photos
+            if Path(reference.file_path).resolve() != target
+        ]
+        if len(after.reference_photos) == len(before.reference_photos):
+            QMessageBox.warning(
+                self,
+                "Reference Not Found",
+                "Could not find that reference photo in the project.",
+            )
+            return
+
+        for index, reference in enumerate(after.reference_photos):
+            reference.sort_order = index
+        try:
+            self._undo_stack.push(
+                ProjectConfigCommand(
+                    before,
+                    after,
+                    "Remove reference photo",
+                    repository=self._repository,
+                    on_applied=self._on_project_config_applied,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to remove reference photo")
+            QMessageBox.critical(self, "Could Not Update Project", str(exc))
+            return
+
+        self.statusBar().showMessage(
+            f"Removed reference from project (file kept): {path.name}"
+        )
 
     def start_metadata_scan(self) -> None:
         self._start_analysis(force_face_reprocess=False)
@@ -519,43 +1151,38 @@ class MainWindow(QMainWindow):
             return
 
         settings = load_settings()
-        needs_reprocess, previous, current = project_needs_face_reprocess(
+        needs_reprocess, _, _ = project_needs_face_reprocess(
             self._project.id, settings
         )
         if force_face_reprocess:
+            preset = get_preset(settings.resolved_preset_id())
             answer = QMessageBox.question(
                 self,
-                "Re-analyze All Faces",
-                "This will ignore cached face results and re-run detection, "
-                "matching, and age estimation for every photo with the current "
-                f"model pack:\n\n{get_preset(settings.resolved_preset_id()).title}\n\n"
-                "Metadata/thumbnails stay cached. Continue?",
+                "Scan faces again?",
+                f"Every photo will be scanned again with “{preset.title}”.\n\n"
+                "This may take a few minutes.",
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
             force_face_reprocess = True
         elif needs_reprocess:
             preset = get_preset(settings.resolved_preset_id())
-            previous_label = previous or "older cache (no model stamp)"
-            QMessageBox.information(
+            answer = QMessageBox.question(
                 self,
-                "Model Changed — Re-analyzing Faces",
-                "This project’s faces were analyzed with a different model:\n\n"
-                f"Previous: {previous_label}\n"
-                f"Current:  {preset.title}\n"
-                f"({current})\n\n"
-                "Cached face matches will be ignored and all photos will be "
-                "re-analyzed with the new model. Metadata can stay skipped "
-                "if files are unchanged.\n\n"
-                "This can take several minutes on large folders.",
+                "New face model",
+                f"The face model changed. Photos will be scanned again with "
+                f"“{preset.title}”.\n\n"
+                "This may take a few minutes.",
             )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
             force_face_reprocess = True
 
         self._set_action_buttons_enabled(False)
         self._processing_view.start()
         if force_face_reprocess:
             self._processing_view.append_log(
-                "Face re-analysis enabled — cached face results will be ignored."
+                "Scanning faces again with the current model…"
             )
         self.statusBar().showMessage("Scanning photos…")
 
@@ -565,6 +1192,7 @@ class MainWindow(QMainWindow):
             input_folder=self._project.input_folder,
             date_of_birth=self._project.date_of_birth,
             reference_photos=self._project.reference_photos,
+            include_subfolders=self._project.include_subfolders,
             force_reprocess=False,
             force_face_reprocess=force_face_reprocess,
             run_face_analysis=True,
@@ -667,6 +1295,7 @@ class MainWindow(QMainWindow):
 
     def _on_scan_finished(self, summary: object) -> None:
         assert isinstance(summary, ScanSummary)
+        self._undo_stack.clear()
         self._processing_view.finish_success(summary)
         self._refresh_photo_list()
         self._set_action_buttons_enabled(True)
@@ -682,12 +1311,14 @@ class MainWindow(QMainWindow):
         )
 
     def _on_scan_cancelled(self) -> None:
+        self._undo_stack.clear()
         self._processing_view.finish_cancelled()
         self._refresh_photo_list()
         self._set_action_buttons_enabled(True)
         self.statusBar().showMessage("Scan cancelled")
 
     def _on_scan_error(self, message: str) -> None:
+        self._undo_stack.clear()
         self._processing_view.finish_error(message)
         self._refresh_photo_list()
         self._set_action_buttons_enabled(True)
@@ -755,6 +1386,8 @@ class MainWindow(QMainWindow):
         self._analyze_button.setEnabled(has_project)
         self._export_button.setEnabled(has_project)
         self._review_button.setEnabled(has_project)
+        self._close_button.setEnabled(has_project)
+        self._edit_button.setEnabled(has_project)
 
     def open_review(self) -> None:
         if self._project is None:
@@ -785,6 +1418,7 @@ class MainWindow(QMainWindow):
             date_of_birth=self._project.date_of_birth,
             project_name=self._project.name,
             reference_photos=self._project.reference_photos,
+            undo_stack=self._undo_stack,
         )
         dialog.exec()
         self._refresh_photo_list()
@@ -800,7 +1434,7 @@ class MainWindow(QMainWindow):
 
     def _apply_display_settings(self) -> None:
         settings = load_settings()
-        self._privacy_banner.setVisible(settings.show_privacy_banner)
+        self._welcome_view.set_privacy_banner_visible(settings.show_privacy_banner)
 
     def open_settings(self) -> None:
         if self._is_busy():

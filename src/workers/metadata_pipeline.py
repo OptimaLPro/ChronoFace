@@ -121,6 +121,10 @@ class MetadataPipeline:
         stat = path.stat()
         existing = self.photo_repo.get_by_path(path)
 
+        # Soft-removed from the project: leave the file on disk, skip re-import.
+        if existing is not None and existing.review_status == ReviewStatus.EXCLUDED:
+            return existing, True
+
         unchanged = (
             existing is not None
             and existing.file_size == stat.st_size

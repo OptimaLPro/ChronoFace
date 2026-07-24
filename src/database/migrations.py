@@ -9,7 +9,7 @@ from src.utils.logging import get_logger
 
 logger = get_logger("database.migrations")
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Base schema (v1+) with placeholder tables for later phases.
 SCHEMA_SQL = """
@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS project (
     input_folder TEXT NOT NULL,
     output_folder TEXT NOT NULL,
     date_of_birth TEXT,
+    include_subfolders INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -141,6 +142,9 @@ MIGRATIONS: dict[int, str] = {
     );
     CREATE INDEX IF NOT EXISTS idx_reference_embeddings_project
         ON reference_embeddings(project_id);
+    """,
+    4: """
+    ALTER TABLE project ADD COLUMN include_subfolders INTEGER NOT NULL DEFAULT 1;
     """,
 }
 

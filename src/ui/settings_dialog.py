@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEventLoop, QObject, Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QSpinBox,
     QTabWidget,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.settings.app_settings import AppSettings, load_settings, save_settings
+from src.utils.pip_install import pip_install
 from src.vision.age_backends import (
     AgeBackendId,
     AgeBackendInfo,
@@ -31,6 +33,7 @@ from src.vision.age_backends import (
 )
 from src.vision.insightface_backend import insightface_available, insightface_import_error
 from src.vision.mivolo_age import mivolo_available, mivolo_import_error
+from src.vision.mivolo_install import install_mivolo_dependencies
 from src.vision.model_catalog import (
     BackendFamily,
     ModelPreset,
@@ -42,6 +45,26 @@ from src.vision.model_manager import (
     describe_install_status,
     ensure_models_for_preset,
 )
+
+
+class _PipInstallWorker(QObject):
+    """Runs a pip installer callback off the UI thread."""
+
+    progress = Signal(str)
+    finished = Signal()
+    failed = Signal(str)
+
+    def __init__(self, installer) -> None:
+        super().__init__()
+        self._installer = installer
+
+    def run(self) -> None:
+        try:
+            self._installer(on_progress=self.progress.emit)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+            return
+        self.finished.emit()
 
 
 class SettingsDialog(QDialog):
@@ -219,7 +242,7 @@ class SettingsDialog(QDialog):
         page = QWidget()
         layout = QVBoxLayout(page)
 
-        self._privacy_banner = QCheckBox("Show privacy banner on the main window")
+        self._privacy_banner = QCheckBox("Show privacy banner on the welcome screen")
         self._verbose = QCheckBox("Verbose logging")
         layout.addWidget(self._privacy_banner)
         layout.addWidget(self._verbose)
@@ -309,21 +332,19 @@ class SettingsDialog(QDialog):
         if preset.backend == BackendFamily.INSIGHTFACE and not insightface_available():
             err = insightface_import_error() or "not installed"
             hints.append(
-                "InsightFace is not installed yet. Save settings, then run:\n"
-                "  pip install insightface onnx\n"
-                f"({err})"
+                "The face identity pack needs an extra piece "
+                "(InsightFace). Click Save Settings — ChronoFace can install it "
+                f"for you.\n({err})"
             )
         if (
             age.id == AgeBackendId.MIVOLO_V2
             and not mivolo_available()
         ):
             hints.append(
-                "MiVOLO v2 needs PyTorch + the mivolo package. GPU (GTX 1660 Ti):\n"
-                "  pip install torch torchvision --index-url "
-                "https://download.pytorch.org/whl/cu124\n"
-                "  pip install transformers accelerate \"setuptools<81\"\n"
-                "  pip install git+https://github.com/WildChlamydia/MiVOLO.git "
-                "--no-build-isolation\n"
+                "The better age model needs a few extra pieces "
+                "(PyTorch and related tools). Click Save Settings — ChronoFace "
+                "can download and install them for you "
+                "(needs internet; may take several minutes).\n"
                 f"({mivolo_import_error()})"
             )
         self._insight_hint.setText("\n\n".join(hints))
@@ -380,6 +401,178 @@ class SettingsDialog(QDialog):
             "Select it under Settings → Models → Age model, then re-analyze.",
         )
 
+    def _confirm_install(
+        self,
+        *,
+        title: str,
+        text: str,
+        informative: str,
+    ) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.setInformativeText(informative)
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        box.setDefaultButton(QMessageBox.StandardButton.Yes)
+        yes = box.button(QMessageBox.StandardButton.Yes)
+        no = box.button(QMessageBox.StandardButton.No)
+        if yes is not None:
+            yes.setText("Install && Save")
+        if no is not None:
+            no.setText("Cancel")
+        return box.exec() == QMessageBox.StandardButton.Yes
+
+    def _center_on_parent(self, dialog: QWidget) -> None:
+        dialog.adjustSize()
+        parent = dialog.parentWidget()
+        if parent is None:
+            return
+        parent_rect = parent.frameGeometry()
+        dialog_rect = dialog.frameGeometry()
+        dialog.move(
+            parent_rect.x() + (parent_rect.width() - dialog_rect.width()) // 2,
+            parent_rect.y() + (parent_rect.height() - dialog_rect.height()) // 2,
+        )
+
+    def _run_install_with_progress(
+        self,
+        *,
+        title: str,
+        start_label: str,
+        installer,
+    ) -> bool:
+        progress = QProgressDialog(start_label, None, 0, 0, self)
+        progress.setWindowTitle(title)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setCancelButton(None)
+        progress.setMinimumWidth(420)
+        progress.show()
+        self._center_on_parent(progress)
+
+        thread = QThread(self)
+        worker = _PipInstallWorker(installer)
+        worker.moveToThread(thread)
+
+        result = {"ok": False, "error": ""}
+        loop = QEventLoop(self)
+
+        def on_progress(message: str) -> None:
+            progress.setLabelText(message)
+            self._center_on_parent(progress)
+
+        def on_finished() -> None:
+            result["ok"] = True
+            thread.quit()
+
+        def on_failed(message: str) -> None:
+            result["error"] = message
+            thread.quit()
+
+        worker.progress.connect(on_progress)
+        worker.finished.connect(on_finished)
+        worker.failed.connect(on_failed)
+        thread.started.connect(worker.run)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(loop.quit)
+
+        thread.start()
+        loop.exec()
+        thread.wait(5000)
+
+        progress.close()
+        if result["ok"]:
+            return True
+
+        QMessageBox.critical(
+            self,
+            "Install Failed",
+            "ChronoFace could not finish installing.\n\n"
+            f"{result['error']}",
+        )
+        return False
+
+    def _ensure_insightface_installed(self) -> bool:
+        if insightface_available():
+            return True
+        if not self._confirm_install(
+            title="Extra Piece Needed",
+            text=(
+                "This face pack needs an extra piece on this computer "
+                "(InsightFace)."
+            ),
+            informative=(
+                "ChronoFace can install it for you (needs internet).\n\n"
+                "Or choose Identity model pack → OpenCV Fast instead."
+            ),
+        ):
+            return False
+
+        ok = self._run_install_with_progress(
+            title="Installing…",
+            start_label="Installing face identity support (InsightFace)…",
+            installer=lambda on_progress: pip_install(
+                ["insightface", "onnx"],
+                on_progress=on_progress,
+            ),
+        )
+        if not ok:
+            return False
+        if not insightface_available():
+            QMessageBox.information(
+                self,
+                "Restart Needed",
+                "Install finished. Please close and reopen ChronoFace "
+                "so the face pack can load.",
+            )
+        return True
+
+    def _ensure_mivolo_installed(self) -> bool:
+        if mivolo_available():
+            return True
+        if not self._confirm_install(
+            title="Extra Pieces Needed",
+            text=(
+                "The better age model needs a few extra pieces on this computer "
+                "(PyTorch and related tools)."
+            ),
+            informative=(
+                "ChronoFace can download and install them for you.\n"
+                "This needs the internet and may take several minutes.\n\n"
+                "Or choose Age model → Built-in instead."
+            ),
+        ):
+            return False
+
+        ok = self._run_install_with_progress(
+            title="Installing…",
+            start_label=(
+                "Installing the better age model pieces…\n"
+                "This can take several minutes."
+            ),
+            installer=install_mivolo_dependencies,
+        )
+        if not ok:
+            return False
+        if not mivolo_available():
+            QMessageBox.information(
+                self,
+                "Restart Needed",
+                "Install finished. Please close and reopen ChronoFace "
+                "so the age model can load.",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Ready",
+                "The better age model pieces are installed.",
+            )
+        self._on_preset_changed()
+        return True
+
     def _on_save(self) -> None:
         preset = self._selected_preset()
         age = self._selected_age_backend()
@@ -387,27 +580,11 @@ class SettingsDialog(QDialog):
             preset.backend == BackendFamily.INSIGHTFACE
             and not insightface_available()
         ):
-            answer = QMessageBox.question(
-                self,
-                "InsightFace Missing",
-                "This pack needs the insightface package, which is not installed.\n\n"
-                "Save anyway? Analysis will fail until you run:\n"
-                "  pip install insightface onnx\n\n"
-                "Or choose “OpenCV Fast” instead.",
-            )
-            if answer != QMessageBox.StandardButton.Yes:
+            if not self._ensure_insightface_installed():
                 return
 
         if age.id == AgeBackendId.MIVOLO_V2 and not mivolo_available():
-            answer = QMessageBox.question(
-                self,
-                "MiVOLO Dependencies Missing",
-                "MiVOLO v2 needs PyTorch and transformers.\n\n"
-                "Save anyway? Age estimation will fail until you run:\n"
-                "  pip install torch transformers accelerate\n\n"
-                "Or choose Age model → Built-in.",
-            )
-            if answer != QMessageBox.StandardButton.Yes:
+            if not self._ensure_mivolo_installed():
                 return
 
         previous = self._settings.model_preset
@@ -443,11 +620,8 @@ class SettingsDialog(QDialog):
             settings.last_model_fingerprint = ""
             QMessageBox.information(
                 self,
-                "Model Changed",
-                "You changed the identity pack and/or age model.\n\n"
-                "Click Analyze Photos — the app will re-analyze faces with the "
-                "new settings (metadata can stay cached).\n\n"
-                "You can also use File → Re-analyze All Faces… anytime.",
+                "Model updated",
+                "Next Analyze Photos will scan faces again with the new model.",
             )
 
         save_settings(settings)

@@ -3,7 +3,11 @@
 from pathlib import Path
 
 from src.domain.models import PhotoRecord, ReviewStatus
-from src.ui.review_timeline import ReviewFilter, _matches_filter
+from src.ui.review_timeline import (
+    ReviewFilter,
+    _matches_filter,
+    parse_review_filter,
+)
 
 
 def test_review_filter_low_confidence() -> None:
@@ -25,3 +29,11 @@ def test_review_filter_manual() -> None:
     )
     assert _matches_filter(photo, ReviewFilter.MANUAL)
     assert _matches_filter(photo, ReviewFilter.ALL)
+
+
+def test_parse_review_filter_accepts_qt_string_userdata() -> None:
+    # QComboBox stores str Enums as plain strings in itemData.
+    assert parse_review_filter("low_confidence") == ReviewFilter.LOW_CONFIDENCE
+    assert parse_review_filter(ReviewFilter.NO_FACE) == ReviewFilter.NO_FACE
+    assert parse_review_filter("not-a-filter") is None
+    assert parse_review_filter(None) is None

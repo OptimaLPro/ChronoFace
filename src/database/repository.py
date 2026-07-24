@@ -41,8 +41,8 @@ class ProjectRepository:
                 """
                 INSERT INTO project (
                     id, name, input_folder, output_folder, date_of_birth,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    include_subfolders, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     config.id,
@@ -50,6 +50,7 @@ class ProjectRepository:
                     str(config.input_folder.resolve()),
                     str(config.output_folder.resolve()),
                     config.date_of_birth.isoformat() if config.date_of_birth else None,
+                    1 if config.include_subfolders else 0,
                     now,
                     now,
                 ),
@@ -79,6 +80,7 @@ class ProjectRepository:
                     input_folder = ?,
                     output_folder = ?,
                     date_of_birth = ?,
+                    include_subfolders = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -87,6 +89,7 @@ class ProjectRepository:
                     str(config.input_folder.resolve()),
                     str(config.output_folder.resolve()),
                     config.date_of_birth.isoformat() if config.date_of_birth else None,
+                    1 if config.include_subfolders else 0,
                     now,
                     config.id,
                 ),
@@ -145,6 +148,9 @@ class ProjectRepository:
                 output_folder=Path(row["output_folder"]),
                 date_of_birth=_parse_optional_date(row["date_of_birth"]),
                 reference_photos=references,
+                include_subfolders=bool(row["include_subfolders"])
+                if "include_subfolders" in row.keys()
+                else True,
                 created_at=_parse_datetime(row["created_at"]),
                 updated_at=_parse_datetime(row["updated_at"]),
             )

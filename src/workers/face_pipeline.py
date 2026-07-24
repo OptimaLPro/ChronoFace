@@ -204,6 +204,10 @@ class FaceAnalysisPipeline:
                 )
 
             try:
+                # Soft-removed photos stay out of analysis and export.
+                if photo.review_status == ReviewStatus.EXCLUDED:
+                    continue
+
                 skip_full = self._should_skip_full_analysis(photo)
                 if skip_full:
                     if (

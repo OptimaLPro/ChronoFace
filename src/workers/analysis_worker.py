@@ -36,6 +36,7 @@ class AnalysisWorker(QObject):
         input_folder: Path,
         date_of_birth: Optional[date] = None,
         reference_photos: Sequence[ReferencePhoto] | None = None,
+        include_subfolders: bool = True,
         force_reprocess: bool = False,
         force_face_reprocess: bool = False,
         run_face_analysis: bool = True,
@@ -45,6 +46,7 @@ class AnalysisWorker(QObject):
         self._input_folder = Path(input_folder)
         self._date_of_birth = date_of_birth
         self._reference_photos = list(reference_photos or [])
+        self._include_subfolders = include_subfolders
         self._force_reprocess = force_reprocess
         self._force_face_reprocess = force_face_reprocess
         self._run_face_analysis = run_face_analysis
@@ -60,6 +62,7 @@ class AnalysisWorker(QObject):
                     project_id=self._project_id,
                     input_folder=self._input_folder,
                     date_of_birth=self._date_of_birth,
+                    recursive=self._include_subfolders,
                     force_reprocess=self._force_reprocess,
                 )
             )

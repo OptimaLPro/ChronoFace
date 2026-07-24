@@ -27,6 +27,8 @@ logger = get_logger("services.identity_correction")
 class ReassignResult:
     photo: PhotoRecord
     face: FaceRecord
+    reference_embedding_id: int | None = None
+    reference_embedding_path: Path | None = None
 
 
 class IdentityCorrectionService:
@@ -154,14 +156,23 @@ class IdentityCorrectionService:
         )
         self.photo_repo.upsert(photo)
 
+        reference_embedding_id: int | None = None
+        reference_embedding_path: Path | None = None
         if also_add_as_reference and updated_face.embedding_path:
-            self._promote_to_reference(
-                photo=photo,
-                face=updated_face,
-                life_stage=reference_life_stage,
+            reference_embedding_path, reference_embedding_id = (
+                self._promote_to_reference(
+                    photo=photo,
+                    face=updated_face,
+                    life_stage=reference_life_stage,
+                )
             )
 
-        return ReassignResult(photo=photo, face=updated_face)
+        return ReassignResult(
+            photo=photo,
+            face=updated_face,
+            reference_embedding_id=reference_embedding_id,
+            reference_embedding_path=reference_embedding_path,
+        )
 
     def add_face_as_reference(
         self,
@@ -173,11 +184,12 @@ class IdentityCorrectionService:
         face = self.face_repo.get_face(face_id)
         if face is None or face.embedding_path is None:
             raise ValueError("Selected face has no saved embedding to promote")
-        return self._promote_to_reference(
+        path, _embedding_id = self._promote_to_reference(
             photo=photo,
             face=face,
             life_stage=life_stage,
         )
+        return path
 
     def _promote_to_reference(
         self,
@@ -185,12 +197,12 @@ class IdentityCorrectionService:
         photo: PhotoRecord,
         face: FaceRecord,
         life_stage: LifeStage,
-    ) -> Path:
+    ) -> tuple[Path, int]:
         assert face.embedding_path is not None
         embedding = np.load(face.embedding_path)
         dest = self._ref_dir / f"manual_photo_{photo.id}_face_{face.id}.npy"
         FaceRepository.save_embedding(dest, embedding)
-        self.face_repo.add_reference_embedding(
+        embedding_id = self.face_repo.add_reference_embedding(
             source_path=photo.original_path,
             life_stage=life_stage,
             embedding_path=dest,
@@ -202,4 +214,4 @@ class IdentityCorrectionService:
             photo.id,
             life_stage.value,
         )
-        return dest
+        return dest, embedding_id

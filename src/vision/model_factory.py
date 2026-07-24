@@ -62,13 +62,12 @@ def _build_age_estimator(
 
     if not mivolo_available():
         raise RuntimeError(
-            "Age backend “MiVOLO v2” is selected but dependencies are missing.\n\n"
-            "Install with (GPU / GTX 1660 Ti):\n"
-            "  pip install torch torchvision --index-url "
-            "https://download.pytorch.org/whl/cu124\n"
-            "  pip install transformers accelerate\n\n"
+            "The better age model is selected, but its extra pieces are not "
+            "installed yet (PyTorch and related tools).\n\n"
+            "Open Settings → Models, keep MiVOLO v2 selected, and click "
+            "Save Settings — ChronoFace can install them for you.\n\n"
             f"Details: {mivolo_import_error()}\n\n"
-            "Or switch Settings → Models → Age model back to Built-in."
+            "Or switch Age model back to Built-in."
         )
     ensure_mivolo_model(download=True)
     estimator = MiVOLOAgeEstimator()
@@ -95,10 +94,10 @@ def create_vision_stack(settings: AppSettings | None = None) -> VisionStack:
     else:
         if not insightface_available():
             raise RuntimeError(
-                "Selected model pack requires the 'insightface' package.\n\n"
-                "Install it with:\n"
-                "  pip install insightface onnx\n\n"
-                "Or switch Settings → Models back to “OpenCV Fast”."
+                "This face pack needs an extra piece (InsightFace).\n\n"
+                "Open Settings → Models and click Save Settings — "
+                "ChronoFace can install it for you.\n\n"
+                "Or switch Identity model pack back to OpenCV Fast."
             )
         assert preset.pack_name is not None
         ensure_insightface_pack(preset.pack_name, download=True)

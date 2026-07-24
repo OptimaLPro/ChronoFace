@@ -49,6 +49,17 @@ def test_discover_images_filters_extensions(tmp_path: Path) -> None:
     assert names == {"a.jpg", "b.png", "d.webp"}
 
 
+def test_discover_images_non_recursive_skips_subfolders(tmp_path: Path) -> None:
+    (tmp_path / "a.jpg").write_bytes(b"x")
+    nested = tmp_path / "sub"
+    nested.mkdir()
+    (nested / "d.webp").write_bytes(b"x")
+
+    found = discover_images(tmp_path, recursive=False)
+    names = {path.name.lower() for path in found}
+    assert names == {"a.jpg"}
+
+
 def test_guess_year_from_filename() -> None:
     assert guess_year_from_name(Path("IMG_2018_vacation.jpg")) == 2018
     assert guess_year_from_name(Path("party-2023-05-01.png")) == 2023

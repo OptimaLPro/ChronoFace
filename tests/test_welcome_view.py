@@ -9,9 +9,9 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
-from src.ui.welcome_view import WelcomeView
+from src.ui.welcome_view import WelcomeView, _ElidedLabel
 
 
 @pytest.fixture(scope="module")
@@ -28,6 +28,10 @@ def test_welcome_view_empty_state(qapp: QApplication) -> None:
     assert not view._empty_label.isHidden()
     assert view._recent_list.isHidden()
     assert view._recent_list.count() == 0
+    assert not view._privacy_banner.isHidden()
+    assert not view._icon_label.pixmap().isNull()
+    view.set_privacy_banner_visible(False)
+    assert view._privacy_banner.isHidden()
 
 
 def test_welcome_view_lists_recent_and_emits_open(qapp: QApplication) -> None:
@@ -52,6 +56,19 @@ def test_welcome_view_lists_recent_and_emits_open(qapp: QApplication) -> None:
     item = view._recent_list.item(0)
     assert item is not None
     assert item.data(Qt.ItemDataRole.UserRole) == "proj-1"
+
+    row_widget = view._recent_list.itemWidget(item)
+    assert row_widget is not None
+    name_label = row_widget.findChild(_ElidedLabel)
+    opened_label = next(
+        label
+        for label in row_widget.findChildren(QLabel)
+        if not isinstance(label, _ElidedLabel)
+    )
+    assert name_label is not None
+    assert name_label._full_text == "Family Album"
+    assert opened_label.text() == "2026-07-20T10:00:00"
+
     view._on_item_activated(item)
     assert opened == ["proj-1"]
 

@@ -80,3 +80,30 @@ def test_export_numbered_copies_and_csv(tmp_path: Path) -> None:
     text = csv_path.read_text(encoding="utf-8")
     assert "output_order" in text
     assert "young.jpg" in text
+
+
+def test_export_skips_excluded_photos(tmp_path: Path) -> None:
+    input_dir = tmp_path / "in"
+    output_dir = tmp_path / "out"
+    input_dir.mkdir()
+
+    kept = _photo(input_dir, "kept.jpg", age=5.0, target=True)
+    removed = _photo(input_dir, "removed.jpg", age=8.0, target=True)
+    removed.review_status = ReviewStatus.EXCLUDED
+
+    result = export_numbered_copies(
+        [kept, removed],
+        ExportOptions(
+            output_dir=output_dir,
+            include_age_in_name=False,
+            export_unresolved_separate=True,
+            export_excluded_separate=True,
+            write_csv=False,
+        ),
+    )
+
+    assert result.exported_main == 1
+    assert result.exported_excluded == 0
+    assert list(output_dir.glob("*.jpg"))
+    assert not (output_dir / "_excluded").exists()
+    assert removed.original_path.is_file()

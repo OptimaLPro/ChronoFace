@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
-from PySide6.QtCore import QDate
+from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QDateEdit,
@@ -23,6 +23,30 @@ from PySide6.QtWidgets import (
 
 from src.domain.models import ProjectConfig
 from src.ui.reference_selector import ReferenceSelector
+
+_BUTTON_STYLE = (
+    "QPushButton {"
+    "  font-weight: 600; padding: 8px 14px;"
+    "  background: #2a2f38; color: #ffffff; border: 1px solid #1f242c;"
+    "  border-radius: 6px;"
+    "}"
+    "QPushButton:hover { background: #3a414d; border-color: #2a2f38; }"
+    "QPushButton:pressed { background: #1f242c; }"
+    "QPushButton:disabled {"
+    "  color: #9aa1ab; background: #e8eaee; border-color: #d5d8de;"
+    "}"
+)
+_PRIMARY_BUTTON_STYLE = (
+    "QPushButton {"
+    "  font-weight: 600; padding: 8px 16px;"
+    "  background: #2f6fed; color: white; border: none; border-radius: 6px;"
+    "}"
+    "QPushButton:hover { background: #2558c7; }"
+    "QPushButton:pressed { background: #1e4aa8; }"
+    "QPushButton:disabled {"
+    "  color: #9aa1ab; background: #e8eaee; border: 1px solid #d5d8de;"
+    "}"
+)
 
 
 class ProjectSetupDialog(QDialog):
@@ -47,11 +71,22 @@ class ProjectSetupDialog(QDialog):
         self._input_edit = QLineEdit()
         self._input_edit.setReadOnly(True)
         input_browse = QPushButton("Browse…")
+        input_browse.setCursor(Qt.CursorShape.PointingHandCursor)
+        input_browse.setStyleSheet(_BUTTON_STYLE)
         input_browse.clicked.connect(self._browse_input)
+
+        self._include_subfolders = QCheckBox("Include subfolders")
+        self._include_subfolders.setChecked(True)
+        self._include_subfolders.setToolTip(
+            "When checked, photos inside nested folders under the input "
+            "folder are scanned too."
+        )
 
         self._output_edit = QLineEdit()
         self._output_edit.setReadOnly(True)
         output_browse = QPushButton("Browse…")
+        output_browse.setCursor(Qt.CursorShape.PointingHandCursor)
+        output_browse.setStyleSheet(_BUTTON_STYLE)
         output_browse.clicked.connect(self._browse_output)
 
         self._dob_enabled = QCheckBox("Date of birth known")
@@ -62,7 +97,7 @@ class ProjectSetupDialog(QDialog):
         self._dob_edit.setEnabled(False)
         self._dob_enabled.toggled.connect(self._dob_edit.setEnabled)
 
-        self._references = ReferenceSelector()
+        self._references = ReferenceSelector(button_style=_BUTTON_STYLE)
 
         privacy = QLabel(
             "All photo analysis is performed locally on this computer.\n"
@@ -70,13 +105,19 @@ class ProjectSetupDialog(QDialog):
         )
         privacy.setStyleSheet(
             "QLabel { background: #eef6ee; border: 1px solid #b7d7b7; "
-            "padding: 8px; color: #1f4d1f; }"
+            "border-radius: 6px; padding: 10px 12px; color: #1f4d1f; "
+            "font-weight: 600; }"
         )
         privacy.setWordWrap(True)
 
         input_row = QHBoxLayout()
         input_row.addWidget(self._input_edit, stretch=1)
         input_row.addWidget(input_browse)
+
+        input_col = QVBoxLayout()
+        input_col.setSpacing(6)
+        input_col.addLayout(input_row)
+        input_col.addWidget(self._include_subfolders)
 
         output_row = QHBoxLayout()
         output_row.addWidget(self._output_edit, stretch=1)
@@ -88,7 +129,7 @@ class ProjectSetupDialog(QDialog):
 
         form = QFormLayout()
         form.addRow("Project name", self._name_edit)
-        form.addRow("Input photo folder", input_row)
+        form.addRow("Input photo folder", input_col)
         form.addRow("Output folder", output_row)
         form.addRow("Date of birth", dob_row)
 
@@ -103,9 +144,15 @@ class ProjectSetupDialog(QDialog):
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.button(QDialogButtonBox.StandardButton.Save).setText(
+        save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
+        save_button.setText(
             "Create Project" if existing is None else "Save Changes"
         )
+        save_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        save_button.setStyleSheet(_PRIMARY_BUTTON_STYLE)
+        cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_button.setStyleSheet(_BUTTON_STYLE)
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
 
@@ -127,6 +174,7 @@ class ProjectSetupDialog(QDialog):
     def _populate(self, config: ProjectConfig) -> None:
         self._name_edit.setText(config.name)
         self._input_edit.setText(str(config.input_folder))
+        self._include_subfolders.setChecked(config.include_subfolders)
         self._output_edit.setText(str(config.output_folder))
         if config.date_of_birth is not None:
             self._dob_enabled.setChecked(True)
@@ -153,6 +201,7 @@ class ProjectSetupDialog(QDialog):
         name = self._name_edit.text().strip()
         input_folder = self._input_edit.text().strip()
         output_folder = self._output_edit.text().strip()
+        include_subfolders = self._include_subfolders.isChecked()
         references = self._references.references()
 
         if not name:
@@ -218,6 +267,7 @@ class ProjectSetupDialog(QDialog):
                 output_folder=Path(output_folder),
                 date_of_birth=dob,
                 reference_photos=references,
+                include_subfolders=include_subfolders,
                 created_at=self._existing.created_at,
             )
         else:
@@ -227,6 +277,7 @@ class ProjectSetupDialog(QDialog):
                 output_folder=Path(output_folder),
                 date_of_birth=dob,
                 reference_photos=references,
+                include_subfolders=include_subfolders,
             )
 
         self._result = config

@@ -24,8 +24,24 @@ except Exception as exc:  # noqa: BLE001
     _IMPORT_ERROR = f"torch not available: {exc}"
 
 
+def _ensure_torch() -> bool:
+    """Import torch, retrying after an in-app pip install."""
+    global torch, _IMPORT_ERROR
+    if torch is not None:
+        return True
+    try:
+        import torch as _torch
+
+        torch = _torch
+        _IMPORT_ERROR = None
+        return True
+    except Exception as exc:  # noqa: BLE001
+        _IMPORT_ERROR = f"torch not available: {exc}"
+        return False
+
+
 def mivolo_available() -> bool:
-    if torch is None:
+    if not _ensure_torch():
         return False
     try:
         import transformers  # noqa: F401
@@ -38,37 +54,24 @@ def mivolo_available() -> bool:
 
 
 def mivolo_import_error() -> str | None:
-    if torch is None:
+    if not _ensure_torch():
         return (
             _IMPORT_ERROR
-            or "Install PyTorch: pip install torch torchvision --index-url "
-            "https://download.pytorch.org/whl/cu124"
+            or "The AI engine (PyTorch) is not installed yet."
         )
     try:
         import transformers  # noqa: F401
     except Exception as exc:  # noqa: BLE001
-        return (
-            f"transformers not available: {exc}. "
-            "Install: pip install transformers accelerate"
-        )
+        return f"Supporting libraries missing: {exc}"
     try:
         import torchvision  # noqa: F401
     except Exception as exc:  # noqa: BLE001
-        return (
-            f"torchvision not available: {exc}. "
-            "Install: pip install torchvision --index-url "
-            "https://download.pytorch.org/whl/cu124"
-        )
+        return f"Torchvision missing: {exc}"
     try:
         import mivolo  # noqa: F401
         import timm  # noqa: F401
     except Exception as exc:  # noqa: BLE001
-        return (
-            f"mivolo package missing: {exc}. "
-            "Install: pip install \"setuptools<81\" && "
-            "pip install git+https://github.com/WildChlamydia/MiVOLO.git "
-            "--no-build-isolation"
-        )
+        return f"Age model package (MiVOLO) missing: {exc}"
     return None
 
 
@@ -107,9 +110,10 @@ def ensure_mivolo_model(*, download: bool = True) -> Path:
     """
     if not mivolo_available():
         raise RuntimeError(
-            "MiVOLO v2 needs PyTorch and transformers.\n\n"
-            "Install with:\n"
-            "  pip install torch transformers accelerate\n\n"
+            "The better age model needs a few extra pieces "
+            "(PyTorch and related tools).\n\n"
+            "Open Settings → Models, choose MiVOLO v2, and save — "
+            "ChronoFace can install them for you.\n\n"
             f"Details: {mivolo_import_error()}"
         )
     cache = mivolo_cache_dir()

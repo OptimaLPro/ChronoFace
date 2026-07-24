@@ -61,6 +61,7 @@ class ProjectConfig:
     output_folder: Path
     date_of_birth: Optional[date] = None
     reference_photos: list[ReferencePhoto] = field(default_factory=list)
+    include_subfolders: bool = True
     id: str = field(default_factory=lambda: str(uuid4()))
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)

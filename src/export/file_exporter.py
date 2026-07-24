@@ -131,6 +131,10 @@ def select_photos_for_export(
     excluded: list[PhotoRecord] = []
 
     for photo in photos:
+        # Soft-removed from the project: keep the file on disk, never export.
+        if photo.review_status == ReviewStatus.EXCLUDED:
+            continue
+
         if options.export_all_in_main:
             main.append(photo)
             continue

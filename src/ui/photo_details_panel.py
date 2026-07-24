@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QMouseEvent, QUndoStack
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -22,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.commands import FaceReassignCommand, PhotoSnapshotCommand, copy_photo
 from src.database.face_repository import FaceRepository
 from src.database.photo_repository import PhotoRepository
 from src.domain.models import LifeStage, PhotoRecord, ReviewStatus
@@ -30,8 +33,38 @@ from src.services.identity_correction import IdentityCorrectionService
 from src.sorting.grouping import age_group_label
 from src.sorting.scoring import apply_sort_decision, decide_sort_for_record
 from src.ui.face_reassignment_bar import FaceReassignmentBar
+from src.ui.photo_lightbox import open_photo_lightbox
 from src.ui.reference_selector import LIFE_STAGE_LABELS
 from src.ui.thumbnail_loader import load_thumbnail_pixmap
+
+
+class _ClickablePreview(QLabel):
+    """Preview label that emits when the user clicks an available photo."""
+
+    clicked = Signal()
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self._clickable = False
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def set_clickable(self, enabled: bool) -> None:
+        self._clickable = enabled
+        self.setCursor(
+            Qt.CursorShape.PointingHandCursor
+            if enabled
+            else Qt.CursorShape.ArrowCursor
+        )
+        self.setToolTip("Click to view larger" if enabled else "")
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if (
+            self._clickable
+            and event.button() == Qt.MouseButton.LeftButton
+            and self.rect().contains(event.position().toPoint())
+        ):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
 
 
 class PhotoDetailsPanel(QWidget):
@@ -46,11 +79,12 @@ class PhotoDetailsPanel(QWidget):
         self._project_id: str | None = None
         self._date_of_birth: Optional[date] = None
         self._correction_service: IdentityCorrectionService | None = None
+        self._undo_stack: QUndoStack | None = None
 
         self.setMinimumWidth(280)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        self._preview = QLabel("Select a photo")
+        self._preview = _ClickablePreview("Select a photo")
         self._preview.setMinimumHeight(180)
         self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._preview.setSizePolicy(
@@ -59,6 +93,7 @@ class PhotoDetailsPanel(QWidget):
         self._preview.setStyleSheet(
             "QLabel { background: #222; color: #ddd; border: 1px solid #444; }"
         )
+        self._preview.clicked.connect(self._open_preview_lightbox)
 
         self._face_preview = QLabel("Face crop")
         self._face_preview.setMinimumHeight(120)
@@ -106,25 +141,25 @@ class PhotoDetailsPanel(QWidget):
         not_target.clicked.connect(self._mark_not_target)
 
         age_row = QHBoxLayout()
+        age_row.setSpacing(8)
         age_row.addWidget(self._age_spin, stretch=1)
         age_row.addWidget(apply_age)
         age_row.addWidget(clear_age)
 
         form = QFormLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(8)
         form.addRow("Manual age", age_row)
 
         reference_row = QHBoxLayout()
+        reference_row.setSpacing(8)
         reference_row.addWidget(QLabel("Life stage:"))
         reference_row.addWidget(self._life_stage_combo, stretch=1)
 
-        title = QLabel("Photo details")
-        title.setStyleSheet("font-weight: 600;")
-
         content = QWidget()
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(8, 8, 8, 8)
+        content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(8)
-        content_layout.addWidget(title)
         content_layout.addWidget(self._preview)
         content_layout.addWidget(self._face_preview)
         content_layout.addWidget(self._face_bar)
@@ -147,25 +182,33 @@ class PhotoDetailsPanel(QWidget):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(scroll)
+        outer.setSpacing(0)
+        outer.addWidget(scroll, stretch=1)
 
     def set_project_context(
         self,
         project_id: str,
         date_of_birth: Optional[date] = None,
+        *,
+        undo_stack: QUndoStack | None = None,
     ) -> None:
         self._project_id = project_id
         self._date_of_birth = date_of_birth
+        self._undo_stack = undo_stack
         self._correction_service = IdentityCorrectionService(
             project_id,
             date_of_birth=date_of_birth,
         )
+
+    def set_undo_stack(self, undo_stack: QUndoStack | None) -> None:
+        self._undo_stack = undo_stack
 
     def set_photo(self, photo: PhotoRecord | None) -> None:
         self._photo = photo
         if photo is None:
             self._preview.setText("Select a photo")
             self._preview.setPixmap(load_thumbnail_pixmap(None))
+            self._preview.set_clickable(False)
             self._face_preview.setText("Face crop")
             self._face_preview.setPixmap(load_thumbnail_pixmap(None))
             self._face_bar.clear()
@@ -183,8 +226,11 @@ class PhotoDetailsPanel(QWidget):
         if preview.isNull():
             self._preview.setText(photo.original_path.name)
             self._preview.setPixmap(load_thumbnail_pixmap(None))
+            self._preview.set_clickable(photo.original_path.is_file())
         else:
+            self._preview.setText("")
             self._preview.setPixmap(preview)
+            self._preview.set_clickable(True)
 
         faces = []
         face_path = None
@@ -202,6 +248,7 @@ class PhotoDetailsPanel(QWidget):
             self._face_preview.setText("No face crop")
             self._face_preview.setPixmap(load_thumbnail_pixmap(None))
         else:
+            self._face_preview.setText("")
             self._face_preview.setPixmap(face_pix)
         self._face_bar.set_faces(faces)
 
@@ -256,26 +303,75 @@ class PhotoDetailsPanel(QWidget):
             f"{photo.sort_score if photo.sort_score is not None else 'n/a'}"
         )
 
-    def _persist(self, photo: PhotoRecord) -> None:
-        decision = decide_sort_for_record(
-            photo,
-            date_of_birth=self._date_of_birth,
-        )
-        apply_sort_decision(
-            photo, decision, date_of_birth=self._date_of_birth
-        )
-        if self._project_id:
-            PhotoRepository(self._project_id).upsert(photo)
+    def _open_preview_lightbox(self) -> None:
+        if self._photo is None:
+            return
+        path: Path | None = None
+        if self._photo.original_path.is_file():
+            path = self._photo.original_path
+        elif self._photo.thumbnail_path and Path(self._photo.thumbnail_path).is_file():
+            path = Path(self._photo.thumbnail_path)
+        open_photo_lightbox(self.window(), path)
+
+    def _on_photo_applied(self, photo: PhotoRecord) -> None:
+        self._photo = photo
         self.photo_updated.emit(photo)
         self.set_photo(photo)
 
+    def _push_photo_mutation(self, text: str, mutate) -> None:
+        if self._photo is None or not self._project_id:
+            return
+        before = copy_photo(self._photo)
+        after = copy_photo(self._photo)
+        mutate(after)
+        decision = decide_sort_for_record(
+            after,
+            date_of_birth=self._date_of_birth,
+        )
+        apply_sort_decision(
+            after, decision, date_of_birth=self._date_of_birth
+        )
+        if self._undo_stack is not None:
+            self._undo_stack.push(
+                PhotoSnapshotCommand(
+                    self._project_id,
+                    before,
+                    after,
+                    text,
+                    on_applied=self._on_photo_applied,
+                )
+            )
+            return
+        saved = PhotoRepository(self._project_id).upsert(after)
+        self._on_photo_applied(saved)
+
     def _on_face_clicked(self, face_id: int) -> None:
-        if self._photo is None or self._correction_service is None:
+        if (
+            self._photo is None
+            or self._correction_service is None
+            or not self._project_id
+        ):
+            return
+        stage = self._life_stage_combo.currentData()
+        if not isinstance(stage, LifeStage):
+            stage = LifeStage.UNKNOWN
+        if self._undo_stack is not None:
+            try:
+                self._undo_stack.push(
+                    FaceReassignCommand(
+                        self._project_id,
+                        self._photo,
+                        face_id,
+                        also_add_as_reference=self._add_reference_check.isChecked(),
+                        reference_life_stage=stage,
+                        correction_service=self._correction_service,
+                        on_applied=self._on_photo_applied,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.critical(self, "Reassignment Failed", str(exc))
             return
         try:
-            stage = self._life_stage_combo.currentData()
-            if not isinstance(stage, LifeStage):
-                stage = LifeStage.UNKNOWN
             result = self._correction_service.reassign_target_face(
                 self._photo,
                 face_id,
@@ -285,47 +381,60 @@ class PhotoDetailsPanel(QWidget):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Reassignment Failed", str(exc))
             return
-        self._photo = result.photo
-        self.photo_updated.emit(result.photo)
-        self.set_photo(result.photo)
+        self._on_photo_applied(result.photo)
 
     def _apply_manual_age(self) -> None:
         if self._photo is None:
             return
-        self._photo.manual_age = float(self._age_spin.value())
-        self._photo.review_status = ReviewStatus.MANUALLY_CORRECTED
-        self._persist(self._photo)
+
+        def mutate(photo: PhotoRecord) -> None:
+            photo.manual_age = float(self._age_spin.value())
+            photo.review_status = ReviewStatus.MANUALLY_CORRECTED
+
+        self._push_photo_mutation("Set manual age", mutate)
 
     def _clear_manual_age(self) -> None:
         if self._photo is None:
             return
-        self._photo.manual_age = None
-        if self._photo.review_status == ReviewStatus.MANUALLY_CORRECTED:
-            self._photo.review_status = (
-                ReviewStatus.NEEDS_REVIEW
-                if self._photo.target_found
-                else ReviewStatus.PENDING
-            )
-        self._persist(self._photo)
+
+        def mutate(photo: PhotoRecord) -> None:
+            photo.manual_age = None
+            if photo.review_status == ReviewStatus.MANUALLY_CORRECTED:
+                photo.review_status = (
+                    ReviewStatus.NEEDS_REVIEW
+                    if photo.target_found
+                    else ReviewStatus.PENDING
+                )
+
+        self._push_photo_mutation("Clear manual age", mutate)
 
     def _mark_approved(self) -> None:
         if self._photo is None:
             return
-        self._photo.review_status = ReviewStatus.APPROVED
-        if self._photo.identity_score:
-            self._photo.target_found = True
-        self._persist(self._photo)
+
+        def mutate(photo: PhotoRecord) -> None:
+            photo.review_status = ReviewStatus.APPROVED
+            if photo.identity_score:
+                photo.target_found = True
+
+        self._push_photo_mutation("Mark approved", mutate)
 
     def _exclude(self) -> None:
         if self._photo is None:
             return
-        self._photo.review_status = ReviewStatus.EXCLUDED
-        self._persist(self._photo)
+
+        def mutate(photo: PhotoRecord) -> None:
+            photo.review_status = ReviewStatus.EXCLUDED
+
+        self._push_photo_mutation("Exclude from export", mutate)
 
     def _mark_not_target(self) -> None:
         if self._photo is None:
             return
-        self._photo.target_found = False
-        self._photo.review_status = ReviewStatus.TARGET_NOT_FOUND
-        self._photo.manual_age = None
-        self._persist(self._photo)
+
+        def mutate(photo: PhotoRecord) -> None:
+            photo.target_found = False
+            photo.review_status = ReviewStatus.TARGET_NOT_FOUND
+            photo.manual_age = None
+
+        self._push_photo_mutation("Mark not target", mutate)

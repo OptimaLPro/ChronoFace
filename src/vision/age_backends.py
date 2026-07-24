@@ -58,11 +58,11 @@ AGE_BACKENDS: dict[AgeBackendId, AgeBackendInfo] = {
             "Much better on children and teens than InsightFace genderage."
         ),
         details=(
-            "Runs on your GPU when CUDA is available (GTX 1660 Ti is fine).\n"
-            "Requires: torch, torchvision, transformers, and the mivolo package "
-            "(see requirements.txt comments).\n"
-            "First run downloads ~100 MB of weights from Hugging Face.\n"
-            "Identity matching still uses your selected InsightFace/OpenCV pack."
+            "Uses your graphics card when available (a GTX 1660 Ti is fine).\n"
+            "Needs a few extra pieces on this computer (PyTorch and related tools) — "
+            "ChronoFace can install them when you save this setting.\n"
+            "First use downloads about 100 MB of model files.\n"
+            "Face identity matching still uses your selected InsightFace/OpenCV pack."
         ),
         download_size="~100 MB",
         ram_hint="Medium (~1–2 GB VRAM / RAM)",

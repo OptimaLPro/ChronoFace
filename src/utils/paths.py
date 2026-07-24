@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -15,6 +16,21 @@ def project_root() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parents[2]
+
+
+def assets_dir() -> Path:
+    """Bundled assets folder (icons, etc.) next to the app root."""
+    return project_root() / "assets"
+
+
+def app_icon_png() -> Path:
+    """High-res application icon used by Qt windows and the welcome screen."""
+    return assets_dir() / "app_icon.png"
+
+
+def app_icon_ico() -> Path:
+    """Windows multi-size .ico used for the packaged ChronoFace.exe."""
+    return assets_dir() / "app_icon.ico"
 
 
 def app_data_dir() -> Path:
@@ -73,3 +89,21 @@ def logs_dir() -> Path:
 def recent_projects_index_path() -> Path:
     """SQLite index of recently opened projects."""
     return app_data_dir() / "app_index.db"
+
+
+def reveal_in_file_manager(path: Path | str) -> None:
+    """Open the system file manager and select ``path`` when possible."""
+    target = Path(path).resolve()
+    if not target.exists():
+        raise FileNotFoundError(f"Path not found: {target}")
+
+    if sys.platform == "win32":
+        subprocess.run(
+            ["explorer", "/select,", str(target)],
+            check=False,
+        )
+    elif sys.platform == "darwin":
+        subprocess.run(["open", "-R", str(target)], check=False)
+    else:
+        folder = target if target.is_dir() else target.parent
+        subprocess.run(["xdg-open", str(folder)], check=False)

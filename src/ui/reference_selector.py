@@ -22,6 +22,19 @@ from PySide6.QtWidgets import (
 from src.domain.models import LifeStage, ReferencePhoto
 from src.utils.image_utils import is_supported_image
 
+_DEFAULT_BUTTON_STYLE = (
+    "QPushButton {"
+    "  font-weight: 600; padding: 8px 14px;"
+    "  background: #2a2f38; color: #ffffff; border: 1px solid #1f242c;"
+    "  border-radius: 6px;"
+    "}"
+    "QPushButton:hover { background: #3a414d; border-color: #2a2f38; }"
+    "QPushButton:pressed { background: #1f242c; }"
+    "QPushButton:disabled {"
+    "  color: #9aa1ab; background: #e8eaee; border-color: #d5d8de;"
+    "}"
+)
+
 LIFE_STAGE_LABELS = {
     LifeStage.UNKNOWN: "Unspecified",
     LifeStage.BABY: "Baby",
@@ -31,14 +44,31 @@ LIFE_STAGE_LABELS = {
 }
 
 
+def format_reference_label(index: int, reference: ReferencePhoto) -> str:
+    """List label: show life stage only when the user set one."""
+    label = f"{index + 1}. {reference.file_path.name}"
+    if reference.life_stage != LifeStage.UNKNOWN:
+        stage = LIFE_STAGE_LABELS.get(
+            reference.life_stage, reference.life_stage.value
+        )
+        label = f"{label} [{stage}]"
+    return label
+
+
 class ReferenceSelector(QWidget):
     """Select multiple reference images and assign optional life-stage groups."""
 
     references_changed = Signal()
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        button_style: str | None = None,
+    ) -> None:
         super().__init__(parent)
         self._references: list[ReferencePhoto] = []
+        style = button_style or _DEFAULT_BUTTON_STYLE
 
         self._list = QListWidget()
         self._list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
@@ -58,15 +88,23 @@ class ReferenceSelector(QWidget):
         )
 
         add_button = QPushButton("Add Reference Photos…")
+        add_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_button.setStyleSheet(style)
         add_button.clicked.connect(self._add_references)
 
         remove_button = QPushButton("Remove Selected")
+        remove_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        remove_button.setStyleSheet(style)
         remove_button.clicked.connect(self._remove_selected)
 
         move_up = QPushButton("Move Up")
+        move_up.setCursor(Qt.CursorShape.PointingHandCursor)
+        move_up.setStyleSheet(style)
         move_up.clicked.connect(lambda: self._move_selected(-1))
 
         move_down = QPushButton("Move Down")
+        move_down.setCursor(Qt.CursorShape.PointingHandCursor)
+        move_down.setStyleSheet(style)
         move_down.clicked.connect(lambda: self._move_selected(1))
 
         button_row = QHBoxLayout()
@@ -236,11 +274,7 @@ class ReferenceSelector(QWidget):
         self._list.clear()
         for index, reference in enumerate(self._references):
             reference.sort_order = index
-            label = (
-                f"{index + 1}. {reference.file_path.name} "
-                f"[{LIFE_STAGE_LABELS.get(reference.life_stage, reference.life_stage.value)}]"
-            )
-            item = QListWidgetItem(label)
+            item = QListWidgetItem(format_reference_label(index, reference))
             item.setToolTip(str(reference.file_path))
             self._list.addItem(item)
 

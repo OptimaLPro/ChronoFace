@@ -10,10 +10,12 @@ from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QComboBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -45,6 +47,27 @@ FILTER_LABELS = {
     ReviewFilter.MANUAL: "Manually corrected",
     ReviewFilter.EXCLUDED: "Excluded",
 }
+
+# Colors used in the review legend (match _status_color below).
+STATUS_LEGEND: tuple[tuple[str, str], ...] = (
+    ("#1565c0", "Match"),
+    ("#ef6c00", "Low confidence"),
+    ("#c62828", "Not found"),
+    ("#6a1b9a", "No face"),
+    ("#2e7d32", "Manual"),
+)
+
+
+def parse_review_filter(value: object) -> ReviewFilter | None:
+    """Convert QComboBox user-data (often a plain str) into ReviewFilter."""
+    if isinstance(value, ReviewFilter):
+        return value
+    if isinstance(value, str):
+        try:
+            return ReviewFilter(value)
+        except ValueError:
+            return None
+    return None
 
 
 def _status_color(photo: PhotoRecord) -> QColor:
@@ -98,6 +121,9 @@ class ReviewTimeline(QWidget):
     selection_changed = Signal(object)  # PhotoRecord | None
     order_changed = Signal(list)  # list[PhotoRecord] in new visual order
 
+    # Shared with ReviewDialog column headers for vertical alignment.
+    HEADER_HEIGHT = 32
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._photos: list[PhotoRecord] = []
@@ -106,11 +132,16 @@ class ReviewTimeline(QWidget):
         self.setMinimumWidth(360)
 
         self._filter_combo = QComboBox()
+        # Store plain strings — Qt coerces str Enums to str in itemData anyway.
         for value, label in FILTER_LABELS.items():
-            self._filter_combo.addItem(label, value)
+            self._filter_combo.addItem(label, value.value)
         self._filter_combo.currentIndexChanged.connect(self._on_filter_changed)
 
         self._count_label = QLabel("0 photos")
+        self._count_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._count_label.setMinimumWidth(130)
 
         self._list = QListWidget()
         self._list.setViewMode(QListWidget.ViewMode.IconMode)
@@ -121,17 +152,39 @@ class ReviewTimeline(QWidget):
         self._list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self._list.setSpacing(8)
         self._list.setWordWrap(True)
+        self._list.setFrameShape(QFrame.Shape.NoFrame)
         self._list.itemSelectionChanged.connect(self._emit_selection)
         self._list.model().rowsMoved.connect(self._on_rows_moved)
 
-        header = QHBoxLayout()
-        header.addWidget(QLabel("Filter:"))
+        filter_label = QLabel("Filter")
+        filter_label.setStyleSheet("font-weight: 600;")
+        filter_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+
+        # Built here but parented by ReviewDialog so both column headers share
+        # one baseline above the splitter content.
+        self._header_bar = QWidget()
+        self._header_bar.setFixedHeight(self.HEADER_HEIGHT)
+        self._header_bar.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        header = QHBoxLayout(self._header_bar)
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+        header.addWidget(filter_label)
         header.addWidget(self._filter_combo, stretch=1)
         header.addWidget(self._count_label)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(header)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         layout.addWidget(self._list, stretch=1)
+
+    @property
+    def header_bar(self) -> QWidget:
+        return self._header_bar
+
 
     def set_date_of_birth(self, date_of_birth: Optional[date]) -> None:
         self._date_of_birth = date_of_birth
@@ -166,9 +219,9 @@ class ReviewTimeline(QWidget):
                 return
 
     def _on_filter_changed(self) -> None:
-        value = self._filter_combo.currentData()
-        if isinstance(value, ReviewFilter):
-            self._filter = value
+        parsed = parse_review_filter(self._filter_combo.currentData())
+        if parsed is not None:
+            self._filter = parsed
         self._rebuild()
 
     def _rebuild(self) -> None:
