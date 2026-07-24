@@ -1,69 +1,61 @@
-"""Dialog for creating or editing a ChronoFace project."""
+"""In-app screen for creating or editing a ChronoFace project."""
+
 from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
 
-from PySide6.QtCore import QDate, Qt
+from PySide6.QtCore import QDate, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QDateEdit,
-    QDialog,
-    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from src.domain.models import ProjectConfig
 from src.ui.reference_selector import ReferenceSelector
-
-_BUTTON_STYLE = (
-    "QPushButton {"
-    "  font-weight: 600; padding: 8px 14px;"
-    "  background: #2a2f38; color: #ffffff; border: 1px solid #1f242c;"
-    "  border-radius: 6px;"
-    "}"
-    "QPushButton:hover { background: #3a414d; border-color: #2a2f38; }"
-    "QPushButton:pressed { background: #1f242c; }"
-    "QPushButton:disabled {"
-    "  color: #9aa1ab; background: #e8eaee; border-color: #d5d8de;"
-    "}"
-)
-_PRIMARY_BUTTON_STYLE = (
-    "QPushButton {"
-    "  font-weight: 600; padding: 8px 16px;"
-    "  background: #2f6fed; color: white; border: none; border-radius: 6px;"
-    "}"
-    "QPushButton:hover { background: #2558c7; }"
-    "QPushButton:pressed { background: #1e4aa8; }"
-    "QPushButton:disabled {"
-    "  color: #9aa1ab; background: #e8eaee; border: 1px solid #d5d8de;"
-    "}"
-)
+from src.ui.message_dialog import MessageDialog
 
 
-class ProjectSetupDialog(QDialog):
-    """Collect project name, folders, optional DOB, and reference photos."""
+def _default_export_folder(name: str, input_folder: Path) -> Path:
+    """Suggested export destination beside the input folder (chosen later at export)."""
+    safe = "".join(c if c.isalnum() or c in "-_ " else "" for c in name).strip()
+    safe = "_".join(safe.split()) or "ChronoFace"
+    return input_folder.resolve().parent / f"{safe}_export"
 
-    def __init__(
-        self,
-        parent: QWidget | None = None,
-        existing: ProjectConfig | None = None,
-    ) -> None:
+
+class ProjectSetupPage(QWidget):
+    """Full-page project create/edit form (not a modal dialog)."""
+
+    saved = Signal(object)  # ProjectConfig
+    deleted = Signal()
+    cancelled = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("New Project" if existing is None else "Edit Project")
-        self.setMinimumSize(600, 520)
-        self.resize(760, 660)
-        self.setSizeGripEnabled(True)
-        self._existing = existing
+        self.setObjectName("projectSetupPage")
+        self.setStyleSheet("QWidget#projectSetupPage { background: #F7F8FB; }")
+        self._existing: ProjectConfig | None = None
         self._result: ProjectConfig | None = None
+
+        self._title = QLabel("New Project")
+        self._title.setObjectName("titleLabel")
+
+        self._subtitle = QLabel(
+            "Name the project, pick the photo folder, and add reference photos "
+            "of the person to track."
+        )
+        self._subtitle.setObjectName("mutedLabel")
+        self._subtitle.setWordWrap(True)
 
         self._name_edit = QLineEdit()
         self._name_edit.setPlaceholderText("e.g. Maya Bat Mitzvah 2026")
@@ -72,7 +64,6 @@ class ProjectSetupDialog(QDialog):
         self._input_edit.setReadOnly(True)
         input_browse = QPushButton("Browse…")
         input_browse.setCursor(Qt.CursorShape.PointingHandCursor)
-        input_browse.setStyleSheet(_BUTTON_STYLE)
         input_browse.clicked.connect(self._browse_input)
 
         self._include_subfolders = QCheckBox("Include subfolders")
@@ -82,13 +73,6 @@ class ProjectSetupDialog(QDialog):
             "folder are scanned too."
         )
 
-        self._output_edit = QLineEdit()
-        self._output_edit.setReadOnly(True)
-        output_browse = QPushButton("Browse…")
-        output_browse.setCursor(Qt.CursorShape.PointingHandCursor)
-        output_browse.setStyleSheet(_BUTTON_STYLE)
-        output_browse.clicked.connect(self._browse_output)
-
         self._dob_enabled = QCheckBox("Date of birth known")
         self._dob_edit = QDateEdit()
         self._dob_edit.setCalendarPopup(True)
@@ -97,20 +81,23 @@ class ProjectSetupDialog(QDialog):
         self._dob_edit.setEnabled(False)
         self._dob_enabled.toggled.connect(self._dob_edit.setEnabled)
 
-        self._references = ReferenceSelector(button_style=_BUTTON_STYLE)
+        self._references = ReferenceSelector()
 
         privacy = QLabel(
-            "All photo analysis is performed locally on this computer.\n"
+            "All photo analysis is performed locally on this computer. "
             "No photos or facial data are uploaded."
         )
         privacy.setStyleSheet(
-            "QLabel { background: #eef6ee; border: 1px solid #b7d7b7; "
-            "border-radius: 6px; padding: 10px 12px; color: #1f4d1f; "
-            "font-weight: 600; }"
+            "QLabel {"
+            "  background: #ECFDF5; border: 1px solid #A7F3D0;"
+            "  border-radius: 10px; padding: 12px 16px;"
+            "  color: #065F46; font-weight: 600;"
+            "}"
         )
         privacy.setWordWrap(True)
 
         input_row = QHBoxLayout()
+        input_row.setSpacing(8)
         input_row.addWidget(self._input_edit, stretch=1)
         input_row.addWidget(input_browse)
 
@@ -119,63 +106,107 @@ class ProjectSetupDialog(QDialog):
         input_col.addLayout(input_row)
         input_col.addWidget(self._include_subfolders)
 
-        output_row = QHBoxLayout()
-        output_row.addWidget(self._output_edit, stretch=1)
-        output_row.addWidget(output_browse)
-
         dob_row = QHBoxLayout()
         dob_row.addWidget(self._dob_enabled)
         dob_row.addWidget(self._dob_edit, stretch=1)
 
         form = QFormLayout()
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(12)
         form.addRow("Project name", self._name_edit)
         form.addRow("Input photo folder", input_col)
-        form.addRow("Output folder", output_row)
         form.addRow("Date of birth", dob_row)
 
         note = QLabel(
-            "Original photos are never modified. Exports will be written as "
-            "numbered copies into the output folder."
+            "Original photos are never modified. You will choose an output "
+            "folder when you export numbered copies."
         )
+        note.setObjectName("mutedLabel")
         note.setWordWrap(True)
-        note.setStyleSheet("color: #555;")
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save
-            | QDialogButtonBox.StandardButton.Cancel
-        )
-        save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
-        save_button.setText(
-            "Create Project" if existing is None else "Save Changes"
-        )
-        save_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        save_button.setStyleSheet(_PRIMARY_BUTTON_STYLE)
-        cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        ref_heading = QLabel("Reference photos of the target person")
+        ref_heading.setObjectName("sectionTitle")
+
+        self._save_button = QPushButton("Create Project")
+        self._save_button.setObjectName("primaryButton")
+        self._save_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._save_button.clicked.connect(self._on_save)
+
+        cancel_button = QPushButton("Cancel")
         cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        cancel_button.setStyleSheet(_BUTTON_STYLE)
-        buttons.accepted.connect(self._on_accept)
-        buttons.rejected.connect(self.reject)
+        cancel_button.clicked.connect(self.cancelled.emit)
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(privacy)
-        layout.addLayout(form)
-        layout.addWidget(note)
-        layout.addWidget(QLabel("Reference photos of the target person"))
-        layout.addWidget(self._references, stretch=1)
-        layout.addWidget(buttons)
+        self._delete_button = QPushButton("Delete Project")
+        self._delete_button.setObjectName("dangerButton")
+        self._delete_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._delete_button.setToolTip(
+            "Permanently remove this project's ChronoFace data. "
+            "Original photos are never deleted."
+        )
+        self._delete_button.clicked.connect(self._on_delete)
+        self._delete_button.hide()
 
-        if existing is not None:
-            self._populate(existing)
+        button_row = QHBoxLayout()
+        button_row.addWidget(self._delete_button)
+        button_row.addStretch(1)
+        button_row.addWidget(cancel_button)
+        button_row.addWidget(self._save_button)
+
+        card = QFrame()
+        card.setObjectName("card")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(28, 28, 28, 28)
+        card_layout.setSpacing(14)
+        card_layout.addWidget(self._title)
+        card_layout.addWidget(self._subtitle)
+        card_layout.addWidget(privacy)
+        card_layout.addLayout(form)
+        card_layout.addWidget(note)
+        card_layout.addSpacing(4)
+        card_layout.addWidget(ref_heading)
+        card_layout.addWidget(self._references, stretch=1)
+        card_layout.addLayout(button_row)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(card)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 20, 24, 20)
+        outer.addWidget(scroll)
+
+    def prepare_new(self) -> None:
+        """Reset form for creating a project."""
+        self._existing = None
+        self._result = None
+        self._title.setText("New Project")
+        self._save_button.setText("Create Project")
+        self._delete_button.hide()
+        self._name_edit.clear()
+        self._input_edit.clear()
+        self._include_subfolders.setChecked(True)
+        self._dob_enabled.setChecked(False)
+        self._dob_edit.setDate(QDate.currentDate().addYears(-13))
+        self._references.set_references([])
+
+    def prepare_edit(self, config: ProjectConfig) -> None:
+        """Load an existing project for editing."""
+        self._existing = config
+        self._result = None
+        self._title.setText("Edit Project")
+        self._save_button.setText("Save Changes")
+        self._delete_button.show()
+        self._populate(config)
 
     def project_config(self) -> ProjectConfig | None:
-        """Return the validated config after a successful accept."""
         return self._result
 
     def _populate(self, config: ProjectConfig) -> None:
         self._name_edit.setText(config.name)
         self._input_edit.setText(str(config.input_folder))
         self._include_subfolders.setChecked(config.include_subfolders)
-        self._output_edit.setText(str(config.output_folder))
         if config.date_of_birth is not None:
             self._dob_enabled.setChecked(True)
             self._dob_edit.setDate(
@@ -185,6 +216,8 @@ class ProjectSetupDialog(QDialog):
                     config.date_of_birth.day,
                 )
             )
+        else:
+            self._dob_enabled.setChecked(False)
         self._references.set_references(config.reference_photos)
 
     def _browse_input(self) -> None:
@@ -192,45 +225,45 @@ class ProjectSetupDialog(QDialog):
         if path:
             self._input_edit.setText(path)
 
-    def _browse_output(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "Select Output Folder")
-        if path:
-            self._output_edit.setText(path)
+    def _on_delete(self) -> None:
+        if self._existing is None:
+            return
+        name = self._existing.name
+        if not MessageDialog.question(
+            self,
+            "Delete Project",
+            f'Delete project "{name}"?',
+            informative=(
+                "This permanently removes ChronoFace analysis data, cache files, "
+                "and project settings for this project.\n\n"
+                "Your original photos and reference photo files are not deleted."
+            ),
+            yes_text="Delete",
+            no_text="Cancel",
+            dangerous=True,
+            default_yes=False,
+        ):
+            return
+        self.deleted.emit()
 
-    def _on_accept(self) -> None:
+    def _on_save(self) -> None:
         name = self._name_edit.text().strip()
         input_folder = self._input_edit.text().strip()
-        output_folder = self._output_edit.text().strip()
         include_subfolders = self._include_subfolders.isChecked()
         references = self._references.references()
 
         if not name:
-            QMessageBox.warning(self, "Missing Name", "Please enter a project name.")
+            MessageDialog.warning(self, "Missing Name", "Please enter a project name.")
             return
         if not input_folder or not Path(input_folder).is_dir():
-            QMessageBox.warning(
+            MessageDialog.warning(
                 self,
                 "Invalid Input Folder",
                 "Please select an existing input photo folder.",
             )
             return
-        if not output_folder:
-            QMessageBox.warning(
-                self,
-                "Missing Output Folder",
-                "Please select an output folder for exported copies.",
-            )
-            return
-        if Path(input_folder).resolve() == Path(output_folder).resolve():
-            QMessageBox.warning(
-                self,
-                "Folders Must Differ",
-                "The output folder must be different from the input folder "
-                "so original photos are never overwritten.",
-            )
-            return
         if not references:
-            QMessageBox.warning(
+            MessageDialog.warning(
                 self,
                 "Reference Photos Required",
                 "Select at least one reference photo of the target person.",
@@ -242,29 +275,28 @@ class ProjectSetupDialog(QDialog):
             qdate = self._dob_edit.date()
             dob = date(qdate.year(), qdate.month(), qdate.day())
             if dob > date.today():
-                QMessageBox.warning(
+                MessageDialog.warning(
                     self,
                     "Invalid Date of Birth",
                     "Date of birth cannot be in the future.",
                 )
                 return
 
-        try:
-            Path(output_folder).mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            QMessageBox.critical(
-                self,
-                "Output Folder Error",
-                f"Could not create or access the output folder:\n{exc}",
-            )
-            return
+        input_path = Path(input_folder)
+        if self._existing is not None:
+            output_folder = Path(self._existing.output_folder)
+        else:
+            output_folder = _default_export_folder(name, input_path)
+
+        if input_path.resolve() == output_folder.resolve():
+            output_folder = input_path.resolve().parent / f"{name}_ChronoFace_export"
 
         if self._existing is not None:
             config = ProjectConfig(
                 id=self._existing.id,
                 name=name,
-                input_folder=Path(input_folder),
-                output_folder=Path(output_folder),
+                input_folder=input_path,
+                output_folder=output_folder,
                 date_of_birth=dob,
                 reference_photos=references,
                 include_subfolders=include_subfolders,
@@ -273,12 +305,16 @@ class ProjectSetupDialog(QDialog):
         else:
             config = ProjectConfig(
                 name=name,
-                input_folder=Path(input_folder),
-                output_folder=Path(output_folder),
+                input_folder=input_path,
+                output_folder=output_folder,
                 date_of_birth=dob,
                 reference_photos=references,
                 include_subfolders=include_subfolders,
             )
 
         self._result = config
-        self.accept()
+        self.saved.emit(config)
+
+
+# Back-compat alias.
+ProjectSetupDialog = ProjectSetupPage

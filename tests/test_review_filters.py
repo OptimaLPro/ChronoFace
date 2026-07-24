@@ -31,6 +31,16 @@ def test_review_filter_manual() -> None:
     assert _matches_filter(photo, ReviewFilter.ALL)
 
 
+def test_review_filter_all_hides_excluded() -> None:
+    photo = PhotoRecord(
+        project_id="p",
+        original_path=Path("a.jpg"),
+        review_status=ReviewStatus.EXCLUDED,
+    )
+    assert not _matches_filter(photo, ReviewFilter.ALL)
+    assert _matches_filter(photo, ReviewFilter.EXCLUDED)
+
+
 def test_parse_review_filter_accepts_qt_string_userdata() -> None:
     # QComboBox stores str Enums as plain strings in itemData.
     assert parse_review_filter("low_confidence") == ReviewFilter.LOW_CONFIDENCE

@@ -48,6 +48,7 @@ class ExportResult:
     skipped: int = 0
     errors: list[str] = field(default_factory=list)
     csv_path: Optional[Path] = None
+    output_dir: Optional[Path] = None
     items: list[ExportItem] = field(default_factory=list)
 
 
@@ -191,7 +192,7 @@ def export_numbered_copies(
             )
             planned.append(("excluded", index, photo, excluded_dir / name))
 
-    result = ExportResult()
+    result = ExportResult(output_dir=output_dir)
     total = len(planned)
     used_names: set[str] = set()
 

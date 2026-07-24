@@ -91,6 +91,21 @@ def recent_projects_index_path() -> Path:
     return app_data_dir() / "app_index.db"
 
 
+def open_in_file_manager(path: Path | str) -> None:
+    """Open ``path`` in the system file manager (folder contents if a directory)."""
+    target = Path(path).resolve()
+    if not target.exists():
+        raise FileNotFoundError(f"Path not found: {target}")
+    folder = target if target.is_dir() else target.parent
+
+    if sys.platform == "win32":
+        os.startfile(folder)  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.run(["open", str(folder)], check=False)
+    else:
+        subprocess.run(["xdg-open", str(folder)], check=False)
+
+
 def reveal_in_file_manager(path: Path | str) -> None:
     """Open the system file manager and select ``path`` when possible."""
     target = Path(path).resolve()

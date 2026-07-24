@@ -6,9 +6,22 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeyEvent, QMouseEvent, QPixmap, QResizeEvent
-from PySide6.QtWidgets import QDialog, QLabel, QWidget
+from PySide6.QtWidgets import QDialog, QLabel, QPushButton, QWidget
 
 from src.ui.thumbnail_loader import load_thumbnail_pixmap
+
+_CLOSE_BUTTON_STYLE = (
+    "QPushButton {"
+    "  color: #ef4444;"
+    "  font-weight: 800;"
+    "  font-size: 28px;"
+    "  background: transparent;"
+    "  border: none;"
+    "  padding: 4px 10px;"
+    "}"
+    "QPushButton:hover { color: #dc2626; }"
+    "QPushButton:pressed { color: #b91c1c; }"
+)
 
 
 class PhotoLightboxDialog(QDialog):
@@ -37,6 +50,15 @@ class PhotoLightboxDialog(QDialog):
         )
         self._backdrop.setCursor(Qt.CursorShape.PointingHandCursor)
         self._backdrop.lower()
+
+        self._close_btn = QPushButton("✕", self)
+        self._close_btn.setObjectName("lightboxClose")
+        self._close_btn.setToolTip("Close")
+        self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._close_btn.setStyleSheet(_CLOSE_BUTTON_STYLE)
+        self._close_btn.setFlat(True)
+        self._close_btn.clicked.connect(self.accept)
+        self._close_btn.raise_()
 
         self._image = QLabel(self)
         self._image.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -69,6 +91,14 @@ class PhotoLightboxDialog(QDialog):
             )
         else:
             self._fit_image()
+        self._layout_chrome()
+
+    def _layout_chrome(self) -> None:
+        """Place the close control in the top-left corner of the modal."""
+        btn_w = max(44, self._close_btn.sizeHint().width())
+        btn_h = max(40, self._close_btn.sizeHint().height())
+        self._close_btn.setGeometry(12, 8, btn_w, btn_h)
+        self._close_btn.raise_()
 
     def _fit_image(self) -> None:
         pad_x = 96
@@ -108,10 +138,15 @@ class PhotoLightboxDialog(QDialog):
         super().resizeEvent(event)
         self._backdrop.setGeometry(self.rect())
         self._fit_image()
+        self._layout_chrome()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
-            if not self._image.geometry().contains(event.position().toPoint()):
+            pos = event.position().toPoint()
+            if self._close_btn.geometry().contains(pos):
+                super().mousePressEvent(event)
+                return
+            if not self._image.geometry().contains(pos):
                 self.accept()
                 return
         super().mousePressEvent(event)

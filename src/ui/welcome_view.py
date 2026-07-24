@@ -1,11 +1,14 @@
-"""Startup welcome screen shown when no project is open."""
+"""Projects page shown when browsing recent projects."""
 
 from __future__ import annotations
+
+from datetime import datetime
 
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -17,6 +20,17 @@ from PySide6.QtWidgets import (
 )
 
 from src.utils.paths import app_icon_png
+
+
+def _format_last_opened(value: str) -> str:
+    """Format an ISO timestamp as a readable date and time."""
+    if not value:
+        return ""
+    try:
+        opened_at = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    return opened_at.strftime("%b %d, %Y, %I:%M %p").replace(" 0", " ")
 
 
 class _ElidedLabel(QLabel):
@@ -50,36 +64,41 @@ class _ElidedLabel(QLabel):
 
 
 class WelcomeView(QWidget):
-    """Clean startup screen: create a project or open a recent one."""
+    """Projects landing: create a project or open a recent one."""
 
     create_project_requested = Signal()
     open_project_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setObjectName("projectsPage")
+        self.setStyleSheet("QWidget#projectsPage { background: #F7F8FB; }")
 
         self._privacy_banner = QLabel(
-            "All photo analysis is performed locally on this computer.\n"
+            "All photo analysis is performed locally on this computer. "
             "No photos or facial data are uploaded."
         )
         self._privacy_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._privacy_banner.setWordWrap(True)
         self._privacy_banner.setStyleSheet(
-            "QLabel { background: #eef6ee; border: 1px solid #b7d7b7; "
-            "padding: 10px; color: #1f4d1f; font-weight: 600; }"
+            "QLabel {"
+            "  background: #ECFDF5; border: 1px solid #A7F3D0;"
+            "  border-radius: 10px; padding: 12px 16px;"
+            "  color: #065F46; font-weight: 600;"
+            "}"
         )
 
         self._icon_label = QLabel()
         self._icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._icon_label.setFixedHeight(104)
+        self._icon_label.setFixedHeight(88)
         icon_path = app_icon_png()
         if icon_path.is_file():
             pixmap = QPixmap(str(icon_path))
             if not pixmap.isNull():
                 self._icon_label.setPixmap(
                     pixmap.scaled(
-                        96,
-                        96,
+                        80,
+                        80,
                         Qt.AspectRatioMode.KeepAspectRatio,
                         Qt.TransformationMode.SmoothTransformation,
                     )
@@ -87,29 +106,23 @@ class WelcomeView(QWidget):
         else:
             self._icon_label.hide()
 
-        title = QLabel("ChronoFace")
+        title = QLabel("Projects")
+        title.setObjectName("titleLabel")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet("font-size: 28px; font-weight: 700;")
+
         subtitle = QLabel(
             "Sort a folder of photos by the age of a specific person.\n"
             "Create a new project or open one you used recently."
         )
+        subtitle.setObjectName("mutedLabel")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setWordWrap(True)
-        subtitle.setStyleSheet("color: #444; font-size: 13px;")
 
         self._create_button = QPushButton("Create New Project")
-        self._create_button.setMinimumHeight(40)
+        self._create_button.setObjectName("primaryButton")
+        self._create_button.setMinimumHeight(42)
         self._create_button.setMinimumWidth(220)
         self._create_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._create_button.setStyleSheet(
-            "QPushButton {"
-            "  font-size: 14px; font-weight: 600; padding: 10px 24px;"
-            "  background: #2f6fed; color: white; border: none; border-radius: 6px;"
-            "}"
-            "QPushButton:hover { background: #2558c7; }"
-            "QPushButton:pressed { background: #1e4aa8; }"
-        )
         self._create_button.clicked.connect(self.create_project_requested.emit)
 
         create_row = QHBoxLayout()
@@ -118,22 +131,25 @@ class WelcomeView(QWidget):
         create_row.addStretch(1)
 
         self._recent_heading = QLabel("Recent projects")
-        self._recent_heading.setStyleSheet(
-            "font-size: 14px; font-weight: 600; margin-top: 8px;"
-        )
+        self._recent_heading.setObjectName("sectionTitle")
 
         self._empty_label = QLabel(
             "No recent projects yet. Create a new project to get started."
         )
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.setWordWrap(True)
-        self._empty_label.setStyleSheet("color: #666; padding: 16px;")
+        self._empty_label.setStyleSheet(
+            "QLabel {"
+            "  color: #6B7280; padding: 20px; background: #FFFFFF;"
+            "  border: 1px solid #EEF0F4; border-radius: 12px;"
+            "}"
+        )
 
         self._recent_list = QListWidget()
         self._recent_list.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection
         )
-        self._recent_list.setAlternatingRowColors(True)
+        self._recent_list.setAlternatingRowColors(False)
         self._recent_list.setMinimumHeight(180)
         self._recent_list.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
@@ -143,40 +159,41 @@ class WelcomeView(QWidget):
         )
         self._recent_list.setStyleSheet(
             "QListWidget {"
-            "  border: 1px solid #ddd; background: white; padding: 4px;"
+            "  border: 1px solid #EEF0F4; background: #FFFFFF;"
+            "  border-radius: 12px; padding: 8px;"
             "}"
-            "QListWidget::item { padding: 0; }"
-            "QListWidget::item:hover { background: #eef4ff; }"
-            "QListWidget::item:selected { background: #d6e4ff; color: #111; }"
+            "QListWidget::item { padding: 0; border-radius: 8px; margin: 2px 0; }"
+            "QListWidget::item:hover { background: #EEF2FF; }"
+            "QListWidget::item:selected { background: #DBEAFE; color: #1F2937; }"
         )
         self._recent_list.itemActivated.connect(self._on_item_activated)
         self._recent_list.itemClicked.connect(self._on_item_activated)
 
-        content = QWidget()
-        content.setMaximumWidth(640)
-        content_layout = QVBoxLayout(content)
-        content_layout.setSpacing(12)
-        content_layout.setContentsMargins(24, 24, 24, 24)
-        content_layout.addStretch(1)
-        content_layout.addWidget(self._icon_label)
-        content_layout.addWidget(title)
-        content_layout.addWidget(subtitle)
-        content_layout.addSpacing(8)
-        content_layout.addLayout(create_row)
-        content_layout.addSpacing(16)
-        content_layout.addWidget(self._recent_heading)
-        content_layout.addWidget(self._empty_label)
-        content_layout.addWidget(self._recent_list, stretch=1)
-        content_layout.addStretch(2)
+        card = QFrame()
+        card.setObjectName("card")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        card.setMaximumWidth(680)
+        card_layout = QVBoxLayout(card)
+        card_layout.setSpacing(12)
+        card_layout.setContentsMargins(32, 32, 32, 32)
+        card_layout.addWidget(self._icon_label)
+        card_layout.addWidget(title)
+        card_layout.addWidget(subtitle)
+        card_layout.addSpacing(8)
+        card_layout.addLayout(create_row)
+        card_layout.addSpacing(12)
+        card_layout.addWidget(self._recent_heading)
+        card_layout.addWidget(self._empty_label)
+        card_layout.addWidget(self._recent_list, stretch=1)
 
         center = QHBoxLayout()
         center.addStretch(1)
-        center.addWidget(content, stretch=1)
+        center.addWidget(card, stretch=1)
         center.addStretch(1)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(8)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.setSpacing(16)
         outer.addWidget(self._privacy_banner)
         outer.addLayout(center, stretch=1)
 
@@ -196,12 +213,12 @@ class WelcomeView(QWidget):
 
         for item in recent:
             name = str(item.get("name") or "Untitled project")
-            opened = str(item.get("last_opened_at") or "")
+            opened = _format_last_opened(str(item.get("last_opened_at") or ""))
             input_folder = str(item.get("input_folder") or "")
 
             row = QListWidgetItem()
             row.setData(Qt.ItemDataRole.UserRole, str(item["id"]))
-            row.setSizeHint(QSize(0, 44))
+            row.setSizeHint(QSize(0, 52))
             tip_parts = [name]
             if input_folder:
                 tip_parts.append(input_folder)
@@ -213,22 +230,21 @@ class WelcomeView(QWidget):
 
     def _build_row_widget(self, name: str, opened: str) -> QWidget:
         row_widget = QWidget()
-        # Let list-item click/activation handle selection and open.
         row_widget.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
         )
         layout = QHBoxLayout(row_widget)
-        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setContentsMargins(14, 10, 14, 10)
         layout.setSpacing(16)
 
         name_label = _ElidedLabel(name)
-        name_label.setStyleSheet("font-size: 13px; font-weight: 600; color: #111;")
+        name_label.setStyleSheet("font-size: 13px; font-weight: 600; color: #1F2937;")
 
         opened_label = QLabel(opened)
         opened_label.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        opened_label.setStyleSheet("font-size: 12px; color: #666;")
+        opened_label.setStyleSheet("font-size: 12px; color: #6B7280;")
         opened_label.setSizePolicy(
             QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred
         )

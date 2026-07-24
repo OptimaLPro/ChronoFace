@@ -24,13 +24,13 @@ class FaceReassignmentBar(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
 
-        self._title = QLabel("Detected faces")
-        self._title.setStyleSheet("font-weight: 600;")
+        self._title = QLabel("Detected Faces")
+        self._title.setObjectName("sectionTitle")
 
         self._hint = QLabel(
             "Click the correct face if the wrong person was picked."
         )
-        self._hint.setStyleSheet("color: #888;")
+        self._hint.setObjectName("mutedLabel")
         self._hint.setWordWrap(True)
 
         self._list = QListWidget()
@@ -43,6 +43,15 @@ class FaceReassignmentBar(QWidget):
         self._list.setWrapping(True)
         self._list.setSpacing(6)
         self._list.setFixedHeight(168)
+        self._list.setStyleSheet(
+            "QListWidget {"
+            "  background: #F9FAFB; border: 1px solid #EEF0F4;"
+            "  border-radius: 10px; padding: 6px;"
+            "}"
+            "QListWidget::item:selected {"
+            "  background: #DBEAFE; border: 2px solid #2F6BFF; border-radius: 8px;"
+            "}"
+        )
         self._list.itemClicked.connect(self._on_item_clicked)
 
         header = QHBoxLayout()
@@ -58,11 +67,12 @@ class FaceReassignmentBar(QWidget):
     def set_faces(self, faces: list[FaceRecord]) -> None:
         self._list.clear()
         if not faces:
+            self._title.setText("Detected Faces (0)")
             self._hint.setText("No faces detected for this photo.")
             return
+        self._title.setText(f"Detected Faces ({len(faces)})")
         self._hint.setText(
-            "Each face has its own AI age. Click the correct person to use "
-            f"their age for this photo. ({len(faces)} face(s))"
+            "Click another detected face to change the selected identity."
         )
         for index, face in enumerate(faces, start=1):
             item = QListWidgetItem()
@@ -105,6 +115,7 @@ class FaceReassignmentBar(QWidget):
 
     def clear(self) -> None:
         self._list.clear()
+        self._title.setText("Detected Faces")
         self._hint.setText("No photo selected.")
 
     def _on_item_clicked(self, item: QListWidgetItem) -> None:

@@ -20,8 +20,9 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from src.ui.main_window import MainWindow
+from src.ui.theme import load_app_stylesheet
 from src.utils.logging import setup_logging
-from src.utils.paths import app_icon_png
+from src.utils.paths import app_icon_ico, app_icon_png
 
 
 def _configure_windows_taskbar_id() -> None:
@@ -39,10 +40,16 @@ def _configure_windows_taskbar_id() -> None:
 
 
 def _load_app_icon() -> QIcon:
-    path = app_icon_png()
-    if path.is_file():
-        return QIcon(str(path))
-    return QIcon()
+    """Build a multi-size icon so Windows taskbar/title bar stay crisp."""
+    icon = QIcon()
+    # Prefer .ico on Windows — it carries 16–256px sizes the taskbar needs.
+    ico = app_icon_ico()
+    if ico.is_file():
+        icon.addFile(str(ico))
+    png = app_icon_png()
+    if png.is_file():
+        icon.addFile(str(png))
+    return icon
 
 
 def main() -> int:
@@ -54,12 +61,15 @@ def main() -> int:
     app.setOrganizationName("ChronoFace")
     app.setOrganizationDomain("chronoface.local")
     app.setStyle("Fusion")
+    app.setStyleSheet(load_app_stylesheet())
 
     icon = _load_app_icon()
     if not icon.isNull():
         app.setWindowIcon(icon)
 
     window = MainWindow()
+    if not icon.isNull():
+        window.setWindowIcon(icon)
     window.show()
     return app.exec()
 

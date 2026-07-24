@@ -68,6 +68,7 @@ def test_export_numbered_copies_and_csv(tmp_path: Path) -> None:
 
     assert result.exported_main == 2
     assert result.exported_excluded == 1
+    assert result.output_dir == output_dir
     main_files = sorted(p.name for p in output_dir.glob("*.jpg"))
     assert main_files[0].startswith("0001_age_03_young")
     assert main_files[1].startswith("0002_age_12_older")

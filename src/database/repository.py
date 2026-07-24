@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
@@ -9,7 +10,7 @@ from typing import Optional
 from src.database.migrations import initialize_app_index, initialize_database
 from src.domain.models import LifeStage, ProjectConfig, ReferencePhoto
 from src.utils.logging import get_logger
-from src.utils.paths import project_db_path, recent_projects_index_path
+from src.utils.paths import project_db_path, projects_dir, recent_projects_index_path
 
 logger = get_logger("database.repository")
 
@@ -177,6 +178,28 @@ class ProjectRepository:
         finally:
             connection.close()
 
+    def delete(self, project_id: str) -> None:
+        """Remove all ChronoFace data for a project.
+
+        Deletes the project database, cache files, and recent-projects index
+        entry. Never deletes the user's original or reference photo files.
+        """
+        connection = initialize_app_index(recent_projects_index_path())
+        try:
+            connection.execute(
+                "DELETE FROM recent_projects WHERE id = ?",
+                (project_id,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        root = projects_dir() / project_id
+        if root.exists():
+            shutil.rmtree(root)
+
+        logger.info("Deleted project data for %s", project_id)
+
     def _replace_references(self, connection, config: ProjectConfig) -> None:
         now = datetime.now().isoformat(timespec="seconds")
         for index, reference in enumerate(config.reference_photos):
@@ -235,8 +258,7 @@ class ProjectRepository:
         output_resolved = Path(config.output_folder).resolve()
         if input_resolved == output_resolved:
             raise ValueError("Output folder must be different from the input folder.")
-
-        output_resolved.mkdir(parents=True, exist_ok=True)
+        # Output folder is created at export time, not when the project is saved.
 
         if not config.reference_photos:
             raise ValueError("Select at least one reference photo.")

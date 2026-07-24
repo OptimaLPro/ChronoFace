@@ -1,4 +1,4 @@
-"""Application Settings dialog — models, matching, downloads."""
+"""Application Settings page — models, matching, downloads."""
 
 from __future__ import annotations
 
@@ -6,18 +6,15 @@ from PySide6.QtCore import QEventLoop, QObject, Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDialog,
-    QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
-    QGroupBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
-    QProgressDialog,
     QPushButton,
+    QScrollArea,
     QSpinBox,
-    QTabWidget,
+    QStackedWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -45,6 +42,7 @@ from src.vision.model_manager import (
     describe_install_status,
     ensure_models_for_preset,
 )
+from src.ui.message_dialog import MessageDialog, ProgressDialog
 
 
 class _PipInstallWorker(QObject):
@@ -67,59 +65,177 @@ class _PipInstallWorker(QObject):
         self.finished.emit()
 
 
-class SettingsDialog(QDialog):
+class SettingsPage(QWidget):
     """Let the user pick model packs and matching thresholds."""
+
+    settings_saved = Signal(object)  # AppSettings
+    cancelled = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Settings")
-        self.setMinimumSize(760, 620)
-        self.resize(860, 700)
-        self.setSizeGripEnabled(True)
+        self.setObjectName("settingsPage")
+        self.setStyleSheet("QWidget#settingsPage { background: #F7F8FB; }")
 
         self._settings = load_settings()
         self._result: AppSettings | None = None
+        self._nav_buttons: list[QPushButton] = []
 
-        tabs = QTabWidget()
-        tabs.addTab(self._build_models_tab(), "Models")
-        tabs.addTab(self._build_matching_tab(), "Matching")
-        tabs.addTab(self._build_downloads_tab(), "Downloads")
-        tabs.addTab(self._build_general_tab(), "General")
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save
-            | QDialogButtonBox.StandardButton.Cancel
+        title = QLabel("Settings")
+        title.setObjectName("titleLabel")
+        subtitle = QLabel(
+            "Choose local models, matching thresholds, and downloads. "
+            "Nothing leaves this computer."
         )
-        buttons.button(QDialogButtonBox.StandardButton.Save).setText("Save Settings")
-        buttons.accepted.connect(self._on_save)
-        buttons.rejected.connect(self.reject)
+        subtitle.setObjectName("mutedLabel")
+        subtitle.setWordWrap(True)
+
+        self._stack = QStackedWidget()
+        sections = (
+            ("Models", self._build_models_tab()),
+            ("Matching", self._build_matching_tab()),
+            ("Downloads", self._build_downloads_tab()),
+            ("General", self._build_general_tab()),
+        )
+        nav_frame = QFrame()
+        nav_frame.setObjectName("settingsNav")
+        nav_frame.setStyleSheet(
+            "QFrame#settingsNav {"
+            "  background: #FFFFFF; border: 1px solid #E5E7EB;"
+            "  border-radius: 10px;"
+            "}"
+        )
+        nav = QHBoxLayout(nav_frame)
+        nav.setContentsMargins(4, 4, 4, 4)
+        nav.setSpacing(4)
+        for index, (label, page) in enumerate(sections):
+            self._stack.addWidget(page)
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setChecked(index == 0)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "QPushButton {"
+                "  font-weight: 600; padding: 8px 18px; border: none;"
+                "  background: transparent; color: #6B7280; border-radius: 8px;"
+                "}"
+                "QPushButton:hover { background: #F3F4F6; color: #1F2937; }"
+                "QPushButton:checked {"
+                "  background: #2F6BFF; color: #FFFFFF;"
+                "}"
+            )
+            btn.clicked.connect(
+                lambda checked=False, i=index: self._show_section(i)
+            )
+            self._nav_buttons.append(btn)
+            nav.addWidget(btn)
+        nav.addStretch(1)
+
+        save_btn = QPushButton("Save Settings")
+        save_btn.setObjectName("primaryButton")
+        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        save_btn.clicked.connect(self._on_save)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.clicked.connect(self._on_cancel)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(save_btn)
+
+        card = QFrame()
+        card.setObjectName("card")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(28, 28, 28, 28)
+        card_layout.setSpacing(16)
+        card_layout.addWidget(title)
+        card_layout.addWidget(subtitle)
+        card_layout.addWidget(nav_frame)
+        card_layout.addWidget(self._stack, stretch=1)
+        card_layout.addLayout(buttons)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(card)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(tabs)
-        layout.addWidget(buttons)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(0)
+        layout.addWidget(scroll)
 
+        self._populate_from_settings()
+
+    def _show_section(self, index: int) -> None:
+        self._stack.setCurrentIndex(index)
+        for i, btn in enumerate(self._nav_buttons):
+            btn.setChecked(i == index)
+
+    @staticmethod
+    def _section_card(
+        *widgets: QWidget,
+        stretch_last: bool = False,
+    ) -> QWidget:
+        """Wrap section body widgets in a light nested panel."""
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(12)
+        last = len(widgets) - 1
+        for index, widget in enumerate(widgets):
+            if stretch_last and index == last:
+                layout.addWidget(widget, stretch=1)
+            else:
+                layout.addWidget(widget)
+        if not stretch_last:
+            layout.addStretch(1)
+        return inner
+
+    @staticmethod
+    def _info_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setObjectName("mutedLabel")
+        return label
+
+    @staticmethod
+    def _styled_text() -> QTextEdit:
+        box = QTextEdit()
+        box.setReadOnly(True)
+        box.setStyleSheet(
+            "QTextEdit {"
+            "  background: #F9FAFB; border: 1px solid #EEF0F4;"
+            "  border-radius: 10px; padding: 12px; color: #374151;"
+            "}"
+        )
+        return box
+
+    def reload(self) -> None:
+        """Reload persisted settings into the form (e.g. when showing the page)."""
+        self._settings = load_settings()
+        self._result = None
         self._populate_from_settings()
 
     def saved_settings(self) -> AppSettings | None:
         return self._result
 
-    def _build_models_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
+    def _on_cancel(self) -> None:
+        self.reload()
+        self.cancelled.emit()
 
-        intro = QLabel(
-            "Choose a local model pack. Everything runs on this computer — nothing is uploaded.\n"
-            "InsightFace packs are among the best open-source face models and are allowed "
-            "for personal / non-commercial use."
+    def _build_models_tab(self) -> QWidget:
+        intro = self._info_label(
+            "Choose a local model pack. Everything runs on this computer — nothing "
+            "is uploaded. InsightFace packs are among the best open-source face "
+            "models for personal / non-commercial use."
         )
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
 
         self._preset_combo = QComboBox()
         for preset in list_presets():
             label = preset.title
             if preset.recommended:
-                label += "  ★ recommended"
+                label += "  · recommended"
             self._preset_combo.addItem(label, preset.id.value)
         self._preset_combo.currentIndexChanged.connect(self._on_preset_changed)
 
@@ -127,54 +243,66 @@ class SettingsDialog(QDialog):
         for backend in list_age_backends():
             label = backend.title
             if backend.recommended:
-                label += "  ★ recommended for age"
+                label += "  · recommended for age"
             self._age_combo.addItem(label, backend.id.value)
         self._age_combo.currentIndexChanged.connect(self._on_age_backend_changed)
 
-        form = QFormLayout()
+        form_host = QWidget()
+        form = QFormLayout(form_host)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(12)
         form.addRow("Identity model pack", self._preset_combo)
         form.addRow("Age model", self._age_combo)
-        layout.addLayout(form)
 
         self._badge = QLabel()
         self._badge.setWordWrap(True)
         self._badge.setStyleSheet(
-            "QLabel { background: #f0f4f8; border: 1px solid #c5d4e3; "
-            "padding: 10px; border-radius: 4px; }"
+            "QLabel {"
+            "  background: #EEF2FF; border: 1px solid #C7D2FE;"
+            "  padding: 12px 14px; border-radius: 10px; color: #1E3A8A;"
+            "}"
         )
-        layout.addWidget(self._badge)
 
-        self._details = QTextEdit()
-        self._details.setReadOnly(True)
-        self._details.setMinimumHeight(220)
-        layout.addWidget(self._details, stretch=1)
+        self._details = self._styled_text()
+        self._details.setMinimumHeight(200)
 
         self._license = QLabel()
         self._license.setWordWrap(True)
-        self._license.setStyleSheet("color: #555;")
-        layout.addWidget(self._license)
+        self._license.setObjectName("mutedLabel")
 
         self._insight_hint = QLabel()
         self._insight_hint.setWordWrap(True)
-        self._insight_hint.setStyleSheet("color: #8a4b08;")
-        layout.addWidget(self._insight_hint)
+        self._insight_hint.setStyleSheet(
+            "QLabel {"
+            "  background: #FFFBEB; border: 1px solid #FDE68A;"
+            "  padding: 12px 14px; border-radius: 10px; color: #92400E;"
+            "}"
+        )
 
-        return page
+        # Pack details as stretch target via host so license/hints stay below.
+        details_host = QWidget()
+        details_layout = QVBoxLayout(details_host)
+        details_layout.setContentsMargins(0, 0, 0, 0)
+        details_layout.setSpacing(12)
+        details_layout.addWidget(self._details, stretch=1)
+        details_layout.addWidget(self._license)
+        details_layout.addWidget(self._insight_hint)
+
+        return self._section_card(
+            intro, form_host, self._badge, details_host, stretch_last=True
+        )
 
     def _build_matching_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-
-        hint = QLabel(
-            "Higher match threshold = stricter “this is the target person”.\n"
+        hint = self._info_label(
+            "Higher match threshold = stricter “this is the target person”. "
             "Leave thresholds on Auto to use values tuned for the selected model pack."
         )
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
 
-        self._auto_thresholds = QCheckBox("Use recommended thresholds for the selected model")
+        self._auto_thresholds = QCheckBox(
+            "Use recommended thresholds for the selected model"
+        )
         self._auto_thresholds.toggled.connect(self._on_auto_thresholds_toggled)
-        layout.addWidget(self._auto_thresholds)
 
         self._match_spin = QDoubleSpinBox()
         self._match_spin.setRange(0.05, 0.95)
@@ -194,61 +322,66 @@ class SettingsDialog(QDialog):
             "(640 is a good default)."
         )
 
-        form = QFormLayout()
+        form_host = QWidget()
+        form = QFormLayout(form_host)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(12)
         form.addRow("Match threshold", self._match_spin)
         form.addRow("Low-confidence threshold", self._low_spin)
         form.addRow("Detection size", self._det_size)
-        layout.addLayout(form)
 
         self._force_reprocess = QCheckBox(
             "After changing models, force a full re-analysis next time"
         )
-        layout.addWidget(self._force_reprocess)
-        layout.addStretch(1)
-        return page
-
-    def _build_downloads_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-
-        layout.addWidget(
-            QLabel(
-                "Models are stored under the project’s models/ folder "
-                "(and downloaded only when needed)."
-            )
+        return self._section_card(
+            hint, self._auto_thresholds, form_host, self._force_reprocess
         )
 
-        self._status_box = QTextEdit()
-        self._status_box.setReadOnly(True)
-        layout.addWidget(self._status_box, stretch=1)
+    def _build_downloads_tab(self) -> QWidget:
+        intro = self._info_label(
+            "Models are stored under the project’s models/ folder "
+            "and downloaded only when needed."
+        )
 
-        row = QHBoxLayout()
+        self._status_box = self._styled_text()
+
         refresh = QPushButton("Refresh Status")
+        refresh.setCursor(Qt.CursorShape.PointingHandCursor)
         refresh.clicked.connect(self._refresh_download_status)
         download = QPushButton("Download Selected Identity Pack…")
+        download.setObjectName("primaryButton")
+        download.setCursor(Qt.CursorShape.PointingHandCursor)
         download.clicked.connect(self._download_selected)
         download_age = QPushButton("Download MiVOLO Age Model…")
+        download_age.setCursor(Qt.CursorShape.PointingHandCursor)
         download_age.clicked.connect(self._download_mivolo)
+
+        row_host = QWidget()
+        row = QHBoxLayout(row_host)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
         row.addWidget(refresh)
         row.addWidget(download)
         row.addWidget(download_age)
         row.addStretch(1)
-        layout.addLayout(row)
 
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(12)
+        layout.addWidget(intro)
+        layout.addWidget(self._status_box, stretch=1)
+        layout.addWidget(row_host)
         self._refresh_download_status()
         return page
 
     def _build_general_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-
         self._privacy_banner = QCheckBox("Show privacy banner on the welcome screen")
         self._verbose = QCheckBox("Verbose logging")
-        layout.addWidget(self._privacy_banner)
-        layout.addWidget(self._verbose)
 
-        about = QGroupBox("About model licenses")
-        about_layout = QVBoxLayout(about)
+        about_title = QLabel("About model licenses")
+        about_title.setObjectName("sectionTitle")
         about_text = QLabel(
             "• OpenCV Fast — OpenCV Zoo / Apache-friendly ecosystem; fine for personal use.\n"
             "• InsightFace buffalo_* / antelopev2 — pretrained weights are for "
@@ -258,10 +391,15 @@ class SettingsDialog(QDialog):
             "Do not use InsightFace packs in a commercial product without a license."
         )
         about_text.setWordWrap(True)
-        about_layout.addWidget(about_text)
-        layout.addWidget(about)
-        layout.addStretch(1)
-        return page
+        about_text.setStyleSheet(
+            "QLabel {"
+            "  background: #F9FAFB; border: 1px solid #EEF0F4;"
+            "  border-radius: 10px; padding: 14px; color: #374151;"
+            "}"
+        )
+        return self._section_card(
+            self._privacy_banner, self._verbose, about_title, about_text
+        )
 
     def _populate_from_settings(self) -> None:
         settings = self._settings
@@ -347,7 +485,9 @@ class SettingsDialog(QDialog):
                 "(needs internet; may take several minutes).\n"
                 f"({mivolo_import_error()})"
             )
-        self._insight_hint.setText("\n\n".join(hints))
+        hint_text = "\n\n".join(hints)
+        self._insight_hint.setText(hint_text)
+        self._insight_hint.setVisible(bool(hint_text.strip()))
 
         if self._auto_thresholds.isChecked():
             self._match_spin.setValue(preset.default_match_threshold)
@@ -376,11 +516,11 @@ class SettingsDialog(QDialog):
         try:
             ensure_models_for_preset(preset.id.value, download=True)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Download Failed", str(exc))
+            MessageDialog.critical(self, "Download Failed", str(exc))
             self._refresh_download_status()
             return
         self._refresh_download_status()
-        QMessageBox.information(
+        MessageDialog.information(
             self,
             "Models Ready",
             f"Model pack “{preset.title}” is ready to use.",
@@ -390,11 +530,11 @@ class SettingsDialog(QDialog):
         try:
             ensure_models_for_preset("age_mivolo_v2", download=True)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Download Failed", str(exc))
+            MessageDialog.critical(self, "Download Failed", str(exc))
             self._refresh_download_status()
             return
         self._refresh_download_status()
-        QMessageBox.information(
+        MessageDialog.information(
             self,
             "MiVOLO Ready",
             "MiVOLO v2 age model is downloaded and ready.\n"
@@ -408,33 +548,14 @@ class SettingsDialog(QDialog):
         text: str,
         informative: str,
     ) -> bool:
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Question)
-        box.setWindowTitle(title)
-        box.setText(text)
-        box.setInformativeText(informative)
-        box.setStandardButtons(
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        box.setDefaultButton(QMessageBox.StandardButton.Yes)
-        yes = box.button(QMessageBox.StandardButton.Yes)
-        no = box.button(QMessageBox.StandardButton.No)
-        if yes is not None:
-            yes.setText("Install && Save")
-        if no is not None:
-            no.setText("Cancel")
-        return box.exec() == QMessageBox.StandardButton.Yes
-
-    def _center_on_parent(self, dialog: QWidget) -> None:
-        dialog.adjustSize()
-        parent = dialog.parentWidget()
-        if parent is None:
-            return
-        parent_rect = parent.frameGeometry()
-        dialog_rect = dialog.frameGeometry()
-        dialog.move(
-            parent_rect.x() + (parent_rect.width() - dialog_rect.width()) // 2,
-            parent_rect.y() + (parent_rect.height() - dialog_rect.height()) // 2,
+        return MessageDialog.question(
+            self,
+            title,
+            text,
+            informative=informative,
+            yes_text="Install and Save",
+            no_text="Cancel",
+            default_yes=True,
         )
 
     def _run_install_with_progress(
@@ -444,14 +565,11 @@ class SettingsDialog(QDialog):
         start_label: str,
         installer,
     ) -> bool:
-        progress = QProgressDialog(start_label, None, 0, 0, self)
-        progress.setWindowTitle(title)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setCancelButton(None)
+        progress = ProgressDialog(
+            self, title=title, label=start_label, minimum=0, maximum=0
+        )
         progress.setMinimumWidth(420)
         progress.show()
-        self._center_on_parent(progress)
 
         thread = QThread(self)
         worker = _PipInstallWorker(installer)
@@ -462,7 +580,6 @@ class SettingsDialog(QDialog):
 
         def on_progress(message: str) -> None:
             progress.setLabelText(message)
-            self._center_on_parent(progress)
 
         def on_finished() -> None:
             result["ok"] = True
@@ -487,7 +604,7 @@ class SettingsDialog(QDialog):
         if result["ok"]:
             return True
 
-        QMessageBox.critical(
+        MessageDialog.critical(
             self,
             "Install Failed",
             "ChronoFace could not finish installing.\n\n"
@@ -522,7 +639,7 @@ class SettingsDialog(QDialog):
         if not ok:
             return False
         if not insightface_available():
-            QMessageBox.information(
+            MessageDialog.information(
                 self,
                 "Restart Needed",
                 "Install finished. Please close and reopen ChronoFace "
@@ -558,14 +675,14 @@ class SettingsDialog(QDialog):
         if not ok:
             return False
         if not mivolo_available():
-            QMessageBox.information(
+            MessageDialog.information(
                 self,
                 "Restart Needed",
                 "Install finished. Please close and reopen ChronoFace "
                 "so the age model can load.",
             )
         else:
-            QMessageBox.information(
+            MessageDialog.information(
                 self,
                 "Ready",
                 "The better age model pieces are installed.",
@@ -618,7 +735,7 @@ class SettingsDialog(QDialog):
             # Drop the global stamp so the next analyze treats this as a model change
             # even for projects that never had a per-project fingerprint file.
             settings.last_model_fingerprint = ""
-            QMessageBox.information(
+            MessageDialog.information(
                 self,
                 "Model updated",
                 "Next Analyze Photos will scan faces again with the new model.",
@@ -626,4 +743,9 @@ class SettingsDialog(QDialog):
 
         save_settings(settings)
         self._result = settings
-        self.accept()
+        self._settings = settings
+        self.settings_saved.emit(settings)
+
+
+# Back-compat alias for imports that still use the old name.
+SettingsDialog = SettingsPage

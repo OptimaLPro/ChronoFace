@@ -67,7 +67,7 @@ def test_welcome_view_lists_recent_and_emits_open(qapp: QApplication) -> None:
     )
     assert name_label is not None
     assert name_label._full_text == "Family Album"
-    assert opened_label.text() == "2026-07-20T10:00:00"
+    assert opened_label.text() == "Jul 20, 2026, 10:00 AM"
 
     view._on_item_activated(item)
     assert opened == ["proj-1"]

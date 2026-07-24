@@ -12,8 +12,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
-    QProgressDialog,
     QPushButton,
     QSizePolicy,
     QSplitter,
@@ -23,14 +21,30 @@ from PySide6.QtWidgets import (
 
 from src.commands import BulkPhotosSnapshotCommand, copy_photos
 from src.database.photo_repository import PhotoRepository
-from src.domain.models import PhotoRecord, ReferencePhoto, ReviewStatus
+from src.database.repository import ProjectRepository
+from src.domain.models import DateReliability, PhotoRecord, ReferencePhoto, ReviewStatus
+from src.metadata.age_from_dob import age_from_dob_and_capture
 from src.sorting.ranking import rank_photo_records
 from src.ui.photo_details_panel import PhotoDetailsPanel
 from src.ui.review_timeline import STATUS_LEGEND, ReviewFilter, ReviewTimeline
+from src.ui.message_dialog import MessageDialog, ProgressDialog
 from src.workers.face_pipeline import FaceAnalysisPipeline, FacePipelineConfig
 
 _LAYOUT_MARGIN = 8
 _LAYOUT_SPACING = 8
+_SPLITTER_GAP = 16
+_BUTTON_STYLE = (
+    "QPushButton {"
+    "  font-weight: 600; padding: 8px 14px;"
+    "  background: #2a2f38; color: #ffffff; border: 1px solid #1f242c;"
+    "  border-radius: 6px;"
+    "}"
+    "QPushButton:hover { background: #3a414d; border-color: #2a2f38; }"
+    "QPushButton:pressed { background: #1f242c; }"
+    "QPushButton:disabled {"
+    "  color: #9aa1ab; background: #e8eaee; border-color: #d5d8de;"
+    "}"
+)
 
 
 class _SinglePhotoWorker(QObject):
@@ -104,7 +118,7 @@ class ReviewDialog(QDialog):
         self._settings = QSettings("ChronoFace", "ChronoFace")
         self._worker_thread: QThread | None = None
         self._worker: _SinglePhotoWorker | None = None
-        self._progress: QProgressDialog | None = None
+        self._progress: ProgressDialog | None = None
 
         help_banner = self._build_help_banner()
 
@@ -119,16 +133,21 @@ class ReviewDialog(QDialog):
 
         self._timeline.selection_changed.connect(self._details.set_photo)
         self._timeline.order_changed.connect(self._on_order_changed)
+        self._timeline.remove_requested.connect(self._on_remove_requested)
+        self._details.remove_requested.connect(self._on_remove_requested)
         self._details.photo_updated.connect(self._on_photo_updated)
         self._details.analyze_requested.connect(self._analyze_selected_photos)
 
         save_order = QPushButton("Save Current Order")
+        save_order.setStyleSheet(_BUTTON_STYLE)
         save_order.clicked.connect(self._save_order)
 
         re_rank = QPushButton("Re-rank by Ages")
+        re_rank.setStyleSheet(_BUTTON_STYLE)
         re_rank.clicked.connect(self._rerank_by_ages)
 
         self._analyze_selected = QPushButton("Re-analyze Selected")
+        self._analyze_selected.setStyleSheet(_BUTTON_STYLE)
         self._analyze_selected.setToolTip(
             "Re-detect faces and estimate a separate AI age for each face "
             "in the selected photo(s)"
@@ -136,10 +155,13 @@ class ReviewDialog(QDialog):
         self._analyze_selected.clicked.connect(self._analyze_selected_photos)
 
         close_btn = QPushButton("Close")
+        close_btn.setStyleSheet(_BUTTON_STYLE)
         close_btn.clicked.connect(self._on_close)
 
         undo_btn = QPushButton("Undo")
+        undo_btn.setStyleSheet(_BUTTON_STYLE)
         redo_btn = QPushButton("Redo")
+        redo_btn.setStyleSheet(_BUTTON_STYLE)
         if undo_stack is not None:
             undo_action = undo_stack.createUndoAction(self, "Undo")
             # Single binding only — duplicate Ctrl+Z entries become ambiguous.
@@ -175,11 +197,18 @@ class ReviewDialog(QDialog):
         right_pane = self._build_column_pane(
             header=self._build_details_header(),
             body=self._details,
+            content_margins=(8, 0, 0, 0),
         )
 
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         self._splitter.setChildrenCollapsible(False)
-        self._splitter.setHandleWidth(_LAYOUT_SPACING)
+        self._splitter.setHandleWidth(_SPLITTER_GAP)
+        self._splitter.setStyleSheet(
+            "QSplitter::handle:horizontal {"
+            "  background: transparent;"
+            "  margin: 0 4px;"
+            "}"
+        )
         self._splitter.addWidget(left_pane)
         self._splitter.addWidget(right_pane)
         self._splitter.setStretchFactor(0, 3)
@@ -210,11 +239,16 @@ class ReviewDialog(QDialog):
         self.reload()
 
     @staticmethod
-    def _build_column_pane(*, header: QWidget, body: QWidget) -> QWidget:
+    def _build_column_pane(
+        *,
+        header: QWidget,
+        body: QWidget,
+        content_margins: tuple[int, int, int, int] = (0, 0, 0, 0),
+    ) -> QWidget:
         """One splitter column: fixed header row + body, 8px gap."""
         pane = QWidget()
         pane_layout = QVBoxLayout(pane)
-        pane_layout.setContentsMargins(0, 0, 0, 0)
+        pane_layout.setContentsMargins(*content_margins)
         pane_layout.setSpacing(_LAYOUT_SPACING)
         pane_layout.addWidget(header)
         pane_layout.addWidget(body, stretch=1)
@@ -260,9 +294,11 @@ class ReviewDialog(QDialog):
 
         how_body = QLabel(
             "1. Drag thumbnails to set order (youngest → oldest).\n"
-            "2. Select a photo to edit age, re-analyze, approve, exclude, "
+            "2. Select a photo to edit age, re-analyze, approve, remove, "
             "or mark as not the target.\n"
-            "3. Click the Photo details preview to view it larger."
+            "3. Click the Photo details preview to view it larger.\n"
+            "4. Hover the photo grid and use Ctrl + / − or Ctrl + mouse wheel "
+            "to resize thumbnails."
         )
         how_body.setWordWrap(True)
         how_body.setStyleSheet("background: transparent; color: #333;")
@@ -303,15 +339,22 @@ class ReviewDialog(QDialog):
         splitter_state = self._settings.value("review/splitter")
         if splitter_state is not None:
             self._splitter.restoreState(splitter_state)
+        thumb_index = self._settings.value("review/thumb_index")
+        if thumb_index is not None:
+            try:
+                self._timeline.set_thumb_index(int(thumb_index))
+            except (TypeError, ValueError):
+                pass
 
     def _save_state(self) -> None:
         self._settings.setValue("review/geometry", self.saveGeometry())
         self._settings.setValue("review/splitter", self._splitter.saveState())
+        self._settings.setValue("review/thumb_index", self._timeline.thumb_index)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self._is_busy():
             event.ignore()
-            QMessageBox.information(
+            MessageDialog.information(
                 self,
                 "Busy",
                 "Wait for the current photo analysis to finish.",
@@ -343,18 +386,28 @@ class ReviewDialog(QDialog):
     def _on_order_changed(self, _photos: list[PhotoRecord]) -> None:
         self._dirty_order = True
 
+    def _on_remove_requested(self, photo: PhotoRecord) -> None:
+        if not MessageDialog.question(
+            self,
+            "Remove from Project",
+            f"Remove this photo from the project?\n\n{photo.original_path.name}",
+            informative="The original file stays on disk. It will not be exported.",
+            yes_text="Remove",
+            no_text="Cancel",
+            dangerous=True,
+            default_yes=False,
+        ):
+            return
+        self._details.set_photo(photo)
+        self._details.remove_current_photo()
+
     def _on_photo_updated(self, photo: PhotoRecord) -> None:
-        self._timeline.refresh_item(photo)
-        # Keep master list age/status in sync for later save-order.
-        for index, current in enumerate(self._timeline._photos):
-            if current.id == photo.id:
-                self._timeline._photos[index] = photo
-                break
+        self._timeline.apply_photo_update(photo)
 
     def _save_order(self) -> None:
         ordered = self._timeline.photos_in_visual_order()
         if self._timeline._filter != ReviewFilter.ALL:
-            QMessageBox.information(
+            MessageDialog.information(
                 self,
                 "Filter Active",
                 "Switch filter to “All photos” before saving a full custom order.\n"
@@ -393,19 +446,83 @@ class ReviewDialog(QDialog):
                 self._repo.upsert(photo)
             on_applied(after)
 
-        QMessageBox.information(
+        MessageDialog.information(
             self,
             "Order Saved",
             f"Saved custom order for {len(after)} photos.\n"
             "Export will use this order.",
         )
 
+    def _sync_date_of_birth_from_project(self) -> str:
+        """
+        Reload birth date from current project settings.
+
+        Keeps Review in sync when the user edits DOB after analysis.
+        Returns a short note for the completion dialog.
+        """
+        previous = self._date_of_birth
+        try:
+            config = ProjectRepository().load(self._project_id)
+        except (OSError, FileNotFoundError, ValueError) as exc:
+            return (
+                "Could not reload project birth date "
+                f"({exc}); used the value from when Review opened."
+            )
+
+        self._date_of_birth = config.date_of_birth
+        self._timeline.set_date_of_birth(config.date_of_birth)
+        self._details.set_project_context(
+            self._project_id,
+            config.date_of_birth,
+            undo_stack=self._undo_stack,
+        )
+
+        # Keep the main window project object aligned if Review is opened from it.
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "_project"):
+            project = getattr(parent, "_project", None)
+            if project is not None and getattr(project, "id", None) == self._project_id:
+                project.date_of_birth = config.date_of_birth
+
+        if config.date_of_birth is None:
+            if previous is not None:
+                return (
+                    "Project birth date was cleared — ages from DOB were removed, "
+                    "then photos were re-ranked."
+                )
+            return "No birth date is set on the project."
+        if previous != config.date_of_birth:
+            return (
+                f"Birth date updated to {config.date_of_birth.isoformat()} "
+                "from project settings; ages from DOB were recalculated."
+            )
+        return (
+            f"Confirmed birth date {config.date_of_birth.isoformat()} "
+            "from project settings; ages from DOB were recalculated."
+        )
+
+    @staticmethod
+    def _recalculate_ages_from_dob(
+        photos: list[PhotoRecord],
+        date_of_birth: Optional[date],
+    ) -> None:
+        """Refresh persisted age_from_dob using the current project DOB."""
+        for photo in photos:
+            capture = (
+                photo.capture_date
+                if photo.date_reliability == DateReliability.RELIABLE_EXIF
+                else None
+            )
+            photo.age_from_dob = age_from_dob_and_capture(date_of_birth, capture)
+
     def _rerank_by_ages(self) -> None:
+        dob_note = self._sync_date_of_birth_from_project()
         photos = self._repo.list_photos()
         before = copy_photos(photos)
         after = copy_photos(photos)
         for photo in after:
             photo.manual_order = None
+        self._recalculate_ages_from_dob(after, self._date_of_birth)
         after = rank_photo_records(after, date_of_birth=self._date_of_birth)
 
         def on_applied(_photos: list[PhotoRecord]) -> None:
@@ -427,9 +544,10 @@ class ReviewDialog(QDialog):
                 self._repo.upsert(photo)
             on_applied(after)
 
-        QMessageBox.information(
+        MessageDialog.information(
             self,
             "Re-ranked",
+            f"{dob_note}\n\n"
             "Cleared custom order and re-ranked by age signals.\n"
             "AI ages above the subject’s maximum age from date of birth "
             "were clamped.",
@@ -437,7 +555,7 @@ class ReviewDialog(QDialog):
 
     def _analyze_selected_photos(self) -> None:
         if self._is_busy():
-            QMessageBox.information(
+            MessageDialog.information(
                 self,
                 "Busy",
                 "Wait for the current photo analysis to finish.",
@@ -445,7 +563,7 @@ class ReviewDialog(QDialog):
             return
         selected = self._timeline.selected_photos()
         if not selected:
-            QMessageBox.information(
+            MessageDialog.information(
                 self,
                 "No Photo Selected",
                 "Select one or more photos in the timeline, then click "
@@ -453,7 +571,7 @@ class ReviewDialog(QDialog):
             )
             return
         if not self._reference_photos:
-            QMessageBox.warning(
+            MessageDialog.warning(
                 self,
                 "No Reference Photos",
                 "Add reference photos to the project before re-analyzing.",
@@ -462,7 +580,7 @@ class ReviewDialog(QDialog):
 
         photo_ids = [photo.id for photo in selected if photo.id is not None]
         if not photo_ids:
-            QMessageBox.warning(
+            MessageDialog.warning(
                 self,
                 "Cannot Analyze",
                 "Selected photos are missing database IDs. Run Analyze Photos "
@@ -471,29 +589,16 @@ class ReviewDialog(QDialog):
             return
 
         total = len(photo_ids)
-        progress = QProgressDialog(self)
-        progress.setWindowTitle("Analyze Photo")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setCancelButton(None)
-        progress.setMinimumDuration(0)
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
-        progress.setMinimumWidth(520)
-        progress.setMaximumWidth(560)
-        progress.setMinimumHeight(140)
-        progress.setRange(0, total)
+        progress = ProgressDialog(
+            self,
+            title="Analyze Photo",
+            label=self._reanalyze_progress_text(0, total, "Starting…"),
+            minimum=0,
+            maximum=total,
+        )
+        progress.setMinimumWidth(480)
         progress.setValue(0)
-        progress.setLabelText(self._reanalyze_progress_text(0, total, "Starting…"))
-        label = progress.findChild(QLabel)
-        if label is not None:
-            label.setMinimumWidth(480)
-            label.setMaximumWidth(520)
-            label.setWordWrap(True)
-            label.setAlignment(
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-            )
         progress.show()
-        progress.resize(520, 150)
         self._progress = progress
 
         thread = QThread(self)
@@ -564,7 +669,7 @@ class ReviewDialog(QDialog):
         selected = self._timeline.selected_photos()
         if selected:
             self._details.set_photo(selected[0])
-        QMessageBox.information(
+        MessageDialog.information(
             self,
             "Analysis Complete",
             "Finished re-analyzing the selected photo(s).",
@@ -576,7 +681,7 @@ class ReviewDialog(QDialog):
             self._progress = None
         if self._undo_stack is not None:
             self._undo_stack.clear()
-        QMessageBox.critical(self, "Analysis Failed", message)
+        MessageDialog.critical(self, "Analysis Failed", message)
 
     def _on_single_thread_finished(self) -> None:
         self._worker_thread = None
@@ -588,18 +693,20 @@ class ReviewDialog(QDialog):
 
     def _on_close(self) -> None:
         if self._is_busy():
-            QMessageBox.information(
+            MessageDialog.information(
                 self,
                 "Busy",
                 "Wait for the current photo analysis to finish.",
             )
             return
         if self._dirty_order:
-            answer = QMessageBox.question(
+            if not MessageDialog.question(
                 self,
                 "Unsaved Order",
                 "You dragged photos but did not save the order. Close anyway?",
-            )
-            if answer != QMessageBox.StandardButton.Yes:
+                yes_text="Close",
+                no_text="Stay",
+                dangerous=True,
+            ):
                 return
         self.accept()

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -42,14 +42,15 @@ class ProcessingView(QWidget):
 
         self._cancel_button = QPushButton("Cancel")
         self._cancel_button.setEnabled(False)
+        self._cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._cancel_button.setStyleSheet(
             "QPushButton {"
             "  font-weight: 600; padding: 8px 14px;"
-            "  background: #2a2f38; color: #ffffff; border: 1px solid #1f242c;"
+            "  background: #c62828; color: #ffffff; border: 1px solid #b71c1c;"
             "  border-radius: 6px;"
             "}"
-            "QPushButton:hover { background: #3a414d; border-color: #2a2f38; }"
-            "QPushButton:pressed { background: #1f242c; }"
+            "QPushButton:hover { background: #d32f2f; border-color: #c62828; }"
+            "QPushButton:pressed { background: #b71c1c; }"
             "QPushButton:disabled {"
             "  color: #b8bec8; background: #f3f4f7; border-color: #e4e7ec;"
             "}"

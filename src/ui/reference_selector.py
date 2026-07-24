@@ -1,4 +1,4 @@
-"""Widget for selecting and tagging reference photos of the target person."""
+"""Widget for selecting reference photos of the target person."""
 
 from __future__ import annotations
 
@@ -7,20 +7,22 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QComboBox,
+    QAbstractItemView,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
-    QMessageBox,
     QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from src.domain.models import LifeStage, ReferencePhoto
 from src.utils.image_utils import is_supported_image
+from src.ui.message_dialog import MessageDialog
 
 _DEFAULT_BUTTON_STYLE = (
     "QPushButton {"
@@ -35,28 +37,67 @@ _DEFAULT_BUTTON_STYLE = (
     "}"
 )
 
-LIFE_STAGE_LABELS = {
-    LifeStage.UNKNOWN: "Unspecified",
-    LifeStage.BABY: "Baby",
-    LifeStage.CHILDHOOD: "Childhood",
-    LifeStage.TEENAGE: "Teenage years",
-    LifeStage.ADULTHOOD: "Adulthood",
-}
+_CANVAS_STYLE = (
+    "QFrame#photoCanvas {"
+    "  background: #ffffff;"
+    "  border: 1px solid #e2e8f0;"
+    "  border-radius: 6px;"
+    "}"
+)
+
+_TABLE_STYLE = (
+    "QTableWidget {"
+    "  background: transparent; alternate-background-color: #f8fafc;"
+    "  border: none; border-radius: 6px;"
+    "  gridline-color: #edf0f4;"
+    "  selection-background-color: #e8eefc; selection-color: #1e293b;"
+    "  font-size: 12px;"
+    "}"
+    "QTableWidget::item { padding: 4px 8px; }"
+    "QHeaderView::section {"
+    "  background: #f7f9fc; color: #475569; font-weight: 600;"
+    "  border: none; border-bottom: 1px solid #e2e8f0;"
+    "  border-right: 1px solid #edf0f4; padding: 6px 8px;"
+    "}"
+    "QHeaderView::section:first { border-top-left-radius: 6px; }"
+    "QHeaderView::section:last {"
+    "  border-right: none; border-top-right-radius: 6px;"
+    "}"
+    "QHeaderView::section:hover { background: #eef2f7; color: #1e293b; }"
+)
+
+_HINT_BUBBLE_STYLE = (
+    "QLabel {"
+    "  background: #eef4ff; border: 1px solid #b7c9f0;"
+    "  border-radius: 6px; padding: 10px 12px; color: #1e3a6e;"
+    "  font-weight: 600;"
+    "}"
+)
+
+_PREVIEW_STYLE = (
+    "QLabel {"
+    "  background: transparent; color: #555;"
+    "  border: none; border-radius: 6px;"
+    "}"
+)
+
+_TABLE_COLUMNS = ("#", "File")
 
 
-def format_reference_label(index: int, reference: ReferencePhoto) -> str:
-    """List label: show life stage only when the user set one."""
-    label = f"{index + 1}. {reference.file_path.name}"
-    if reference.life_stage != LifeStage.UNKNOWN:
-        stage = LIFE_STAGE_LABELS.get(
-            reference.life_stage, reference.life_stage.value
-        )
-        label = f"{label} [{stage}]"
-    return label
+def _wrap_canvas(widget: QWidget) -> QFrame:
+    canvas = QFrame()
+    canvas.setObjectName("photoCanvas")
+    canvas.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+    canvas.setStyleSheet(_CANVAS_STYLE)
+    layout = QVBoxLayout(canvas)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(0)
+    layout.addWidget(widget)
+    return canvas
 
 
 class ReferenceSelector(QWidget):
-    """Select multiple reference images and assign optional life-stage groups."""
+    """Select multiple reference images of the target person."""
 
     references_changed = Signal()
 
@@ -70,22 +111,37 @@ class ReferenceSelector(QWidget):
         self._references: list[ReferencePhoto] = []
         style = button_style or _DEFAULT_BUTTON_STYLE
 
-        self._list = QListWidget()
-        self._list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        self._list.currentRowChanged.connect(self._on_selection_changed)
-
-        self._stage_combo = QComboBox()
-        for stage, label in LIFE_STAGE_LABELS.items():
-            self._stage_combo.addItem(label, stage)
-        self._stage_combo.currentIndexChanged.connect(self._on_stage_changed)
-        self._stage_combo.setEnabled(False)
+        self._table = QTableWidget()
+        self._table.setColumnCount(len(_TABLE_COLUMNS))
+        self._table.setHorizontalHeaderLabels(list(_TABLE_COLUMNS))
+        self._table.setStyleSheet(_TABLE_STYLE)
+        self._table.setFrameShape(QFrame.Shape.NoFrame)
+        self._table.setAlternatingRowColors(True)
+        self._table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self._table.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setShowGrid(False)
+        self._table.setWordWrap(False)
+        self._table.verticalHeader().setVisible(False)
+        header = self._table.horizontalHeader()
+        header.setStretchLastSection(True)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._table.setColumnWidth(0, 40)
+        # Keep enough viewport height to show at least four reference rows.
+        row_height = max(self._table.verticalHeader().defaultSectionSize(), 28)
+        header_height = max(self._table.horizontalHeader().sizeHint().height(), 28)
+        self._table.setMinimumHeight(header_height + (row_height * 4) + 8)
+        self._table.itemSelectionChanged.connect(self._on_selection_changed)
 
         self._preview = QLabel("No reference selected")
         self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._preview.setMinimumHeight(160)
-        self._preview.setStyleSheet(
-            "QLabel { background: #f3f3f3; border: 1px solid #ccc; color: #555; }"
-        )
+        self._preview.setStyleSheet(_PREVIEW_STYLE)
 
         add_button = QPushButton("Add Reference Photos…")
         add_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -114,30 +170,30 @@ class ReferenceSelector(QWidget):
         button_row.addWidget(move_down)
         button_row.addStretch(1)
 
-        stage_row = QHBoxLayout()
-        stage_row.addWidget(QLabel("Life stage for selected:"))
-        stage_row.addWidget(self._stage_combo, stretch=1)
-
         hint = QLabel(
             "Add 3–10 photos of the same person across ages when possible "
             "(baby, child, teen, adult). Different angles and lighting help."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #555;")
+        hint.setStyleSheet(_HINT_BUBBLE_STYLE)
+
+        table_canvas = _wrap_canvas(self._table)
+        preview_canvas = _wrap_canvas(self._preview)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
         layout.addWidget(hint)
         layout.addLayout(button_row)
-        layout.addWidget(self._list, stretch=2)
-        layout.addLayout(stage_row)
-        layout.addWidget(self._preview, stretch=1)
+        layout.addWidget(table_canvas, stretch=2)
+        layout.addWidget(preview_canvas, stretch=1)
 
     def references(self) -> list[ReferencePhoto]:
         """Return a copy of the current reference list."""
         return [
             ReferencePhoto(
                 file_path=ref.file_path,
-                life_stage=ref.life_stage,
+                life_stage=LifeStage.UNKNOWN,
                 sort_order=index,
                 id=ref.id,
             )
@@ -149,14 +205,21 @@ class ReferenceSelector(QWidget):
         self._references = [
             ReferencePhoto(
                 file_path=Path(ref.file_path),
-                life_stage=ref.life_stage,
+                life_stage=LifeStage.UNKNOWN,
                 sort_order=ref.sort_order,
                 id=ref.id,
             )
             for ref in references
         ]
-        self._refresh_list()
+        self._refresh_table()
         self.references_changed.emit()
+
+    def _current_row(self) -> int:
+        return self._table.currentRow()
+
+    def _selected_rows(self) -> list[int]:
+        rows = {index.row() for index in self._table.selectedIndexes()}
+        return sorted(rows)
 
     def _add_references(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
@@ -191,7 +254,7 @@ class ReferenceSelector(QWidget):
             added += 1
 
         if skipped:
-            QMessageBox.warning(
+            MessageDialog.warning(
                 self,
                 "Unsupported Files",
                 "These files were skipped (unsupported type):\n"
@@ -199,24 +262,21 @@ class ReferenceSelector(QWidget):
             )
 
         if added:
-            self._refresh_list()
+            self._refresh_table()
             self.references_changed.emit()
 
     def _remove_selected(self) -> None:
-        rows = sorted(
-            {index.row() for index in self._list.selectedIndexes()},
-            reverse=True,
-        )
+        rows = sorted(self._selected_rows(), reverse=True)
         if not rows:
             return
         for row in rows:
             if 0 <= row < len(self._references):
                 del self._references[row]
-        self._refresh_list()
+        self._refresh_table()
         self.references_changed.emit()
 
     def _move_selected(self, delta: int) -> None:
-        row = self._list.currentRow()
+        row = self._current_row()
         if row < 0:
             return
         target = row + delta
@@ -226,35 +286,16 @@ class ReferenceSelector(QWidget):
             self._references[target],
             self._references[row],
         )
-        self._refresh_list()
-        self._list.setCurrentRow(target)
+        self._refresh_table(keep_row=target)
         self.references_changed.emit()
 
-    def _on_selection_changed(self, row: int) -> None:
-        self._stage_combo.blockSignals(True)
+    def _on_selection_changed(self) -> None:
+        row = self._current_row()
         if row < 0 or row >= len(self._references):
-            self._stage_combo.setEnabled(False)
             self._preview.setText("No reference selected")
             self._preview.setPixmap(QPixmap())
-            self._stage_combo.blockSignals(False)
             return
-
-        reference = self._references[row]
-        self._stage_combo.setEnabled(True)
-        stage_index = self._stage_combo.findData(reference.life_stage)
-        self._stage_combo.setCurrentIndex(max(stage_index, 0))
-        self._stage_combo.blockSignals(False)
-        self._show_preview(reference.file_path)
-
-    def _on_stage_changed(self) -> None:
-        row = self._list.currentRow()
-        if row < 0 or row >= len(self._references):
-            return
-        stage = self._stage_combo.currentData()
-        if isinstance(stage, LifeStage):
-            self._references[row].life_stage = stage
-            self._refresh_list(keep_row=row)
-            self.references_changed.emit()
+        self._show_preview(self._references[row].file_path)
 
     def _show_preview(self, path: Path) -> None:
         pixmap = QPixmap(str(path))
@@ -269,22 +310,32 @@ class ReferenceSelector(QWidget):
         )
         self._preview.setPixmap(scaled)
 
-    def _refresh_list(self, keep_row: int | None = None) -> None:
-        current = self._list.currentRow() if keep_row is None else keep_row
-        self._list.clear()
+    def _refresh_table(self, keep_row: int | None = None) -> None:
+        current = self._current_row() if keep_row is None else keep_row
+        self._table.setRowCount(0)
+        self._table.setRowCount(len(self._references))
         for index, reference in enumerate(self._references):
             reference.sort_order = index
-            item = QListWidgetItem(format_reference_label(index, reference))
-            item.setToolTip(str(reference.file_path))
-            self._list.addItem(item)
+
+            index_item = QTableWidgetItem(str(index + 1))
+            index_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            index_item.setToolTip(str(reference.file_path))
+
+            file_item = QTableWidgetItem(reference.file_path.name)
+            file_item.setToolTip(str(reference.file_path))
+
+            self._table.setItem(index, 0, index_item)
+            self._table.setItem(index, 1, file_item)
 
         if self._references:
-            self._list.setCurrentRow(min(max(current, 0), len(self._references) - 1))
+            row = min(max(current, 0), len(self._references) - 1)
+            self._table.selectRow(row)
+            self._table.setCurrentCell(row, 0)
         else:
-            self._on_selection_changed(-1)
+            self._on_selection_changed()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        row = self._list.currentRow()
+        row = self._current_row()
         if 0 <= row < len(self._references):
             self._show_preview(self._references[row].file_path)
