@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/app_icon.png" alt="ChronoFace" width="128">
+</p>
+
 # ChronoFace
 
 Windows desktop application that sorts a folder of photos by the estimated age of a specific person appearing in them.
