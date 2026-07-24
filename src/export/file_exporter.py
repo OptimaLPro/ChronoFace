@@ -21,7 +21,7 @@ ProgressCallback = Callable[[int, int, str], None]
 
 @dataclass
 class ExportOptions:
-    """User choices for a Premiere-friendly numbered export."""
+    """User choices for a numbered age-ordered export."""
 
     output_dir: Path
     include_age_in_name: bool = True
@@ -55,7 +55,7 @@ _UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
 def sanitize_filename(name: str, max_length: int = 120) -> str:
-    """Make a filename safe for Windows Explorer / Premiere."""
+    """Make a filename safe for Windows Explorer and other filesystem tools."""
     cleaned = _UNSAFE_CHARS.sub("_", name).strip(" .")
     if not cleaned:
         cleaned = "photo"

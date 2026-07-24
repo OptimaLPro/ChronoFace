@@ -1,4 +1,4 @@
-"""Export options dialog for numbered Premiere-friendly copies."""
+"""Export options dialog for numbered age-ordered photo copies."""
 
 from __future__ import annotations
 
