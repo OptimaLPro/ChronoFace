@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSplitter,
+    QStackedWidget,
     QStatusBar,
     QVBoxLayout,
     QWidget,
@@ -29,6 +30,7 @@ from src.ui.project_setup_dialog import ProjectSetupDialog
 from src.ui.reference_selector import LIFE_STAGE_LABELS
 from src.ui.review_dialog import ReviewDialog
 from src.ui.settings_dialog import SettingsDialog
+from src.ui.welcome_view import WelcomeView
 from src.settings.app_settings import load_settings
 from src.utils.logging import get_logger
 from src.workers.analysis_worker import AnalysisWorker
@@ -43,9 +45,12 @@ PRIVACY_TEXT = (
     "No photos or facial data are uploaded."
 )
 
+_PAGE_WELCOME = 0
+_PAGE_WORKSPACE = 1
+
 
 class MainWindow(QMainWindow):
-    """Top-level window: project summary, metadata scan, and placeholders."""
+    """Top-level window: welcome screen, then project workspace."""
 
     def __init__(self, repository: ProjectRepository | None = None) -> None:
         super().__init__()
@@ -140,6 +145,10 @@ class MainWindow(QMainWindow):
             "QLabel { background: #eef6ee; border: 1px solid #b7d7b7; "
             "padding: 10px; color: #1f4d1f; font-weight: 600; }"
         )
+
+        self._welcome_view = WelcomeView()
+        self._welcome_view.create_project_requested.connect(self.new_project)
+        self._welcome_view.open_project_requested.connect(self._open_project_by_id)
 
         self._title_label = QLabel("No project open")
         self._title_label.setStyleSheet("font-size: 20px; font-weight: 600;")
@@ -243,21 +252,35 @@ class MainWindow(QMainWindow):
         self._splitter.setStretchFactor(1, 2)
         self._splitter.setSizes([660, 440])
 
+        workspace = QWidget()
+        workspace_layout = QVBoxLayout(workspace)
+        workspace_layout.setContentsMargins(0, 0, 0, 0)
+        workspace_layout.setSpacing(0)
+        workspace_layout.addWidget(self._splitter)
+
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._welcome_view)
+        self._stack.addWidget(workspace)
+
         central = QWidget()
         layout = QVBoxLayout(central)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
         layout.addWidget(self._privacy_banner)
-        layout.addWidget(self._splitter, stretch=1)
+        layout.addWidget(self._stack, stretch=1)
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
 
     def _show_welcome(self) -> None:
-        recent = self._repository.list_recent(limit=1)
+        recent = self._repository.list_recent()
+        self._welcome_view.set_recent_projects(recent)
+        self._stack.setCurrentIndex(_PAGE_WELCOME)
         if recent:
             self.statusBar().showMessage(
-                f"Last project: {recent[0]['name']} — use File → Open Recent Project…"
+                f"Last project: {recent[0]['name']} — click it below to open"
             )
+        else:
+            self.statusBar().showMessage("Create a new project to get started")
 
     def new_project(self) -> None:
         if self._is_busy():
@@ -337,7 +360,12 @@ class MainWindow(QMainWindow):
         if not ok or not choice:
             return
         index = labels.index(choice)
-        project_id = recent[index]["id"]
+        self._open_project_by_id(recent[index]["id"])
+
+    def _open_project_by_id(self, project_id: str) -> None:
+        if self._is_busy():
+            QMessageBox.warning(self, "Busy", "Wait for the current task to finish.")
+            return
         try:
             config = self._repository.load(project_id)
         except Exception as exc:  # noqa: BLE001
@@ -380,6 +408,7 @@ class MainWindow(QMainWindow):
         self._export_button.setEnabled(True)
         self._review_button.setEnabled(True)
         self._refresh_photo_list()
+        self._stack.setCurrentIndex(_PAGE_WORKSPACE)
         self.statusBar().showMessage(f"Opened project: {config.name}")
         logger.info("UI loaded project %s", config.id)
 
