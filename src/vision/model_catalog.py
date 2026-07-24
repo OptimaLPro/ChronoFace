@@ -136,7 +136,7 @@ MODEL_PRESETS: dict[ModelPresetId, ModelPreset] = {
             "Recognition: ResNet50 @ WebFace600K (ArcFace)\n"
             "Age/Gender: InsightFace attribute model\n\n"
             "Recommended for personal use when you care about correct identity matching. "
-            "Slower than OpenCV Fast, but usually worth it for Premiere-ready timelines."
+            "Slower than OpenCV Fast, but usually worth it for accurate age-ordered sorting."
         ),
         recommended=True,
     ),

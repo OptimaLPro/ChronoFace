@@ -1,4 +1,4 @@
-"""CSV report export for Premiere / review workflows."""
+"""CSV report export for review and export workflows."""
 
 from __future__ import annotations
 

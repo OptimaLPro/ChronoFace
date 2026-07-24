@@ -160,7 +160,7 @@ class MainWindow(QMainWindow):
         self._processing_view.cancel_requested.connect(self._cancel_scan)
 
         self._phase_note = QLabel(
-            "Review corrections, then export numbered copies for Premiere Pro.\n"
+            "Review corrections, then export numbered copies in age order.\n"
             "Use Review Results to drag-reorder and set manual ages. "
             "Originals are never modified."
         )
@@ -186,7 +186,7 @@ class MainWindow(QMainWindow):
         self._export_button = QPushButton("Export to Folder")
         self._export_button.setEnabled(False)
         self._export_button.setToolTip(
-            "Copy numbered photos into the output folder for Premiere Pro"
+            "Copy numbered photos into the output folder in youngest-to-oldest order"
         )
         self._export_button.clicked.connect(self.start_export)
 
@@ -649,7 +649,7 @@ class MainWindow(QMainWindow):
             "Analysis Complete",
             ProcessingView._format_summary(summary)
             + "\n\nPhotos are ranked youngest → oldest.\n"
-            "Use Review Results to fix mistakes, then Export to Folder for Premiere.",
+            "Use Review Results to fix mistakes, then Export to Folder.",
         )
 
     def _on_scan_cancelled(self) -> None:
@@ -797,8 +797,8 @@ class MainWindow(QMainWindow):
             "About ChronoFace",
             "ChronoFace\n"
             "Settings + swappable local model packs\n\n"
-            "Sort client photo dumps by the age of a specific person "
-            "for Adobe Premiere Pro timelines.\n\n"
+            "Sort client photo collections by the age of a specific person "
+            "for presentations, slideshows, and other chronological workflows.\n\n"
             "Open Settings to choose OpenCV Fast or InsightFace model packs "
             "(personal / non-commercial).\n\n"
             f"{PRIVACY_TEXT}",

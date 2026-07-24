@@ -2,7 +2,7 @@
 
 Windows desktop application that sorts a folder of photos by the estimated age of a specific person appearing in them.
 
-Built for video editors who receive large, unordered client photo dumps (Bar/Bat Mitzvahs, weddings, birthdays, family events) and need a youngest-to-oldest sequence for Adobe Premiere Pro.
+Sort large, unordered photo collections by a specific person's estimated age — youngest to oldest — for presentations, slideshows, albums, and other chronological workflows.
 
 ## Privacy
 
@@ -14,7 +14,7 @@ MVP complete through review + export, plus **Settings → model packs**:
 
 - Local analysis (metadata, faces, age, ranking)
 - **Review & Correct** timeline (drag order, manual age, face reassignment, exclude)
-- **Export to Folder** numbered Premiere copies + CSV
+- **Export to Folder** numbered age-ordered copies + CSV
 - **Settings** to choose OpenCV Fast or InsightFace buffalo/antelope packs
 - Windows portable build script (`scripts/build_windows.py`)
 
@@ -68,7 +68,7 @@ After changing models, run **Analyze Photos** again (embeddings are not compatib
 1. Click **Review & Correct**
 2. Drag thumbnails to fix order (filter must be “All photos” to save full order)
 3. Select a photo → set manual age / reassign face / approve / exclude / mark not target
-4. Click **Export to Folder** for Premiere-ready numbered copies
+4. Click **Export to Folder** for numbered copies in youngest-to-oldest order
 
 ## Windows portable build
 

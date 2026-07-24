@@ -1,1 +1,1 @@
-"""Export helpers for Premiere-friendly numbered copies."""
+"""Export helpers for numbered age-ordered photo copies."""
