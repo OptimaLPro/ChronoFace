@@ -16,10 +16,11 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
-from src.ui.main_window import MainWindow
+from src.ui.splash_screen import StartupSplash
 from src.ui.theme import load_app_stylesheet
 from src.utils.logging import setup_logging
 from src.utils.paths import app_icon_ico, app_icon_png
@@ -67,10 +68,37 @@ def main() -> int:
     if not icon.isNull():
         app.setWindowIcon(icon)
 
-    window = MainWindow()
-    if not icon.isNull():
-        window.setWindowIcon(icon)
-    window.show()
+    splash = StartupSplash()
+    splash.center_on_screen()
+    splash.show()
+    app.processEvents()
+
+    # Keep a strong ref so the splash is not GC'd before fade-out finishes.
+    app._chronoface_splash = splash  # type: ignore[attr-defined]
+
+    def boot() -> None:
+        try:
+            splash.set_status("Loading interface…")
+            app.processEvents()
+
+            # Heavy UI / vision imports happen here — after the splash is visible.
+            from src.ui.main_window import MainWindow
+
+            splash.set_status("Preparing workspace…")
+            app.processEvents()
+
+            window = MainWindow()
+            if not icon.isNull():
+                window.setWindowIcon(icon)
+            # Keep the main window alive for the app lifetime.
+            app._chronoface_window = window  # type: ignore[attr-defined]
+            splash.finish_with(window)
+        except Exception:
+            splash.close()
+            raise
+
+    # Let the splash paint and start animating before the heavy boot work.
+    QTimer.singleShot(60, boot)
     return app.exec()
 
 

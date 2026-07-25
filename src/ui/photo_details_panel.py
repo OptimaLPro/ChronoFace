@@ -81,6 +81,7 @@ class PhotoDetailsPanel(QWidget):
         self._date_of_birth: Optional[date] = None
         self._correction_service: IdentityCorrectionService | None = None
         self._undo_stack: QUndoStack | None = None
+        self._suppress_autosave = False
 
         self.setMinimumWidth(280)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -152,6 +153,7 @@ class PhotoDetailsPanel(QWidget):
         self._age_spin.setSingleStep(0.5)
         self._age_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self._age_spin.setEnabled(False)
+        self._age_spin.editingFinished.connect(self._autosave_fields)
 
         self._status_combo = QComboBox()
         self._status_combo.addItem("Target person", "target")
@@ -160,6 +162,7 @@ class PhotoDetailsPanel(QWidget):
         self._status_combo.addItem("Not target", "not_target")
         self._status_combo.addItem("Removed", "excluded")
         self._status_combo.setEnabled(False)
+        self._status_combo.currentIndexChanged.connect(self._autosave_fields)
 
         self._date_display = QLabel("—")
         self._date_display.setObjectName("mutedLabel")
@@ -172,11 +175,14 @@ class PhotoDetailsPanel(QWidget):
         form.addRow("Date", self._date_display)
         form.addRow("Status", self._status_combo)
 
-        self._save_button = QPushButton("Save Changes")
-        self._save_button.setObjectName("primaryButton")
-        self._save_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._save_button.setEnabled(False)
-        self._save_button.clicked.connect(self._save_changes)
+        self._approve_button = QPushButton("Approve")
+        self._approve_button.setObjectName("primaryButton")
+        self._approve_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._approve_button.setEnabled(False)
+        self._approve_button.setToolTip(
+            "Confirm this photo shows the target and move it out of Needs review"
+        )
+        self._approve_button.clicked.connect(self._approve_photo)
 
         self._remove_button = QPushButton("Remove Photo")
         self._remove_button.setObjectName("dangerButton")
@@ -209,7 +215,7 @@ class PhotoDetailsPanel(QWidget):
         details_layout.addWidget(self._match_bar)
         details_layout.addSpacing(4)
         details_layout.addLayout(form)
-        details_layout.addWidget(self._save_button)
+        details_layout.addWidget(self._approve_button)
         details_layout.addWidget(self._remove_button)
         details_layout.addWidget(self._analyze_button)
         details_layout.addWidget(self._face_bar)
@@ -270,138 +276,149 @@ class PhotoDetailsPanel(QWidget):
 
     def set_photo(self, photo: PhotoRecord | None) -> None:
         self._photo = photo
-        if photo is None:
-            self._preview.setText("Select a photo")
-            self._preview.setPixmap(load_thumbnail_pixmap(None))
-            self._preview.set_clickable(False)
-            self._badge.hide()
-            self._filename.setText("")
-            self._age_label.setText("")
-            self._date_label.setText("")
-            self._match_value.setText("—")
-            self._match_bar.setValue(0)
-            self._date_display.setText("—")
-            self._face_bar.clear()
-            self._age_spin.setEnabled(False)
-            self._status_combo.setEnabled(False)
-            self._save_button.setEnabled(False)
-            self._remove_button.setEnabled(False)
-            self._analyze_button.setEnabled(False)
-            return
+        self._suppress_autosave = True
+        try:
+            if photo is None:
+                self._preview.setText("Select a photo")
+                self._preview.setPixmap(load_thumbnail_pixmap(None))
+                self._preview.set_clickable(False)
+                self._badge.hide()
+                self._filename.setText("")
+                self._age_label.setText("")
+                self._date_label.setText("")
+                self._match_value.setText("—")
+                self._match_bar.setValue(0)
+                self._date_display.setText("—")
+                self._face_bar.clear()
+                self._age_spin.setEnabled(False)
+                self._status_combo.setEnabled(False)
+                self._approve_button.setEnabled(False)
+                self._remove_button.setEnabled(False)
+                self._analyze_button.setEnabled(False)
+                return
 
-        self._age_spin.setEnabled(True)
-        self._status_combo.setEnabled(True)
-        self._save_button.setEnabled(True)
-        self._remove_button.setEnabled(True)
-        self._analyze_button.setEnabled(True)
+            self._age_spin.setEnabled(True)
+            self._status_combo.setEnabled(True)
+            self._approve_button.setEnabled(
+                photo.review_status != ReviewStatus.APPROVED
+            )
+            self._remove_button.setEnabled(True)
+            self._analyze_button.setEnabled(True)
 
-        preview = load_thumbnail_pixmap(
-            photo.thumbnail_path or photo.original_path,
-            size=360,
-        )
-        if preview.isNull():
-            self._preview.setText(photo.original_path.name)
-            self._preview.setPixmap(load_thumbnail_pixmap(None))
-            self._preview.set_clickable(photo.original_path.is_file())
-        else:
-            self._preview.setText("")
-            self._preview.setPixmap(preview)
-            self._preview.set_clickable(True)
+            preview = load_thumbnail_pixmap(
+                photo.thumbnail_path or photo.original_path,
+                size=360,
+            )
+            if preview.isNull():
+                self._preview.setText(photo.original_path.name)
+                self._preview.setPixmap(load_thumbnail_pixmap(None))
+                self._preview.set_clickable(photo.original_path.is_file())
+            else:
+                self._preview.setText("")
+                self._preview.setPixmap(preview)
+                self._preview.set_clickable(True)
 
-        score = photo.identity_score
-        has_exif = photo.date_reliability == DateReliability.RELIABLE_EXIF
-        no_match = is_no_match_photo(photo)
-        # EXIF date makes age trustworthy — treat as high match even if face score is low.
-        is_high_match = (
-            not no_match
-            and photo.target_found
-            and ((score is not None and score >= 0.55) or has_exif)
-        )
-        is_low_match = (
-            not no_match
-            and not is_high_match
-            and photo.target_found
-            and (
+            score = photo.identity_score
+            has_exif = photo.date_reliability == DateReliability.RELIABLE_EXIF
+            no_match = is_no_match_photo(photo)
+            # High/Low match feed Target found; No match feeds Not found.
+            matched = (
+                not no_match
+                and photo.review_status != ReviewStatus.EXCLUDED
+                and (
+                    photo.target_found
+                    or photo.review_status == ReviewStatus.LOW_CONFIDENCE
+                )
+            )
+            # EXIF date makes age trustworthy — treat as high match even if face score is low.
+            is_high_match = matched and (
+                (score is not None and score >= 0.55) or has_exif
+            )
+            is_low_match = matched and not is_high_match and (
                 photo.review_status == ReviewStatus.LOW_CONFIDENCE
                 or (score is not None and score < 0.55)
+                or photo.target_found
             )
-        )
-        if is_high_match:
-            self._badge.setText("High match")
-            self._badge.setStyleSheet(
-                "QLabel {"
-                "  background: #16A34A; color: white; font-weight: 700;"
-                "  font-size: 11px; border-radius: 6px; padding: 4px 8px;"
-                "}"
+            if is_high_match:
+                self._badge.setText("High match")
+                self._badge.setStyleSheet(
+                    "QLabel {"
+                    "  background: #16A34A; color: white; font-weight: 700;"
+                    "  font-size: 11px; border-radius: 6px; padding: 4px 8px;"
+                    "}"
+                )
+                self._show_badge()
+            elif is_low_match:
+                self._badge.setText("Low match")
+                self._badge.setStyleSheet(
+                    "QLabel {"
+                    "  background: #D97706; color: white; font-weight: 700;"
+                    "  font-size: 11px; border-radius: 6px; padding: 4px 8px;"
+                    "}"
+                )
+                self._show_badge()
+            elif no_match:
+                self._badge.setText("No match")
+                self._badge.setStyleSheet(
+                    "QLabel {"
+                    "  background: #DC2626; color: white; font-weight: 700;"
+                    "  font-size: 11px; border-radius: 6px; padding: 4px 8px;"
+                    "}"
+                )
+                self._show_badge()
+            else:
+                self._badge.hide()
+
+            faces = []
+            if self._project_id and photo.id is not None:
+                faces = FaceRepository(self._project_id).list_faces_for_photo(photo.id)
+            self._face_bar.set_faces(faces)
+
+            age = effective_age_for_name(photo, self._date_of_birth)
+            self._age_spin.blockSignals(True)
+            if photo.manual_age is not None:
+                self._age_spin.setValue(photo.manual_age)
+            elif age is not None:
+                self._age_spin.setValue(age)
+            else:
+                self._age_spin.setValue(0.0)
+            self._age_spin.blockSignals(False)
+
+            conf = photo.age_confidence
+            age_text = (
+                f"{age:.1f} years old"
+                if age is not None
+                else "Age unknown"
             )
-            self._show_badge()
-        elif is_low_match:
-            self._badge.setText("Low match")
-            self._badge.setStyleSheet(
-                "QLabel {"
-                "  background: #D97706; color: white; font-weight: 700;"
-                "  font-size: 11px; border-radius: 6px; padding: 4px 8px;"
-                "}"
-            )
-            self._show_badge()
-        elif no_match or not photo.target_found:
-            self._badge.setText("No match")
-            self._badge.setStyleSheet(
-                "QLabel {"
-                "  background: #DC2626; color: white; font-weight: 700;"
-                "  font-size: 11px; border-radius: 6px; padding: 4px 8px;"
-                "}"
-            )
-            self._show_badge()
-        else:
-            self._badge.hide()
+            if conf is not None and age is not None:
+                age_text += f" (± {conf:.1f})"
+            self._age_label.setText(age_text)
 
-        faces = []
-        if self._project_id and photo.id is not None:
-            faces = FaceRepository(self._project_id).list_faces_for_photo(photo.id)
-        self._face_bar.set_faces(faces)
+            if photo.capture_date:
+                date_text = photo.capture_date.strftime("%Y-%m-%d")
+                if photo.date_reliability == DateReliability.RELIABLE_EXIF:
+                    date_text += " (EXIF)"
+                elif photo.date_reliability == DateReliability.WEAK_FILESYSTEM:
+                    date_text += " (filesystem)"
+            else:
+                date_text = "No date"
+            self._date_label.setText(date_text)
+            self._date_display.setText(date_text)
 
-        age = effective_age_for_name(photo, self._date_of_birth)
-        if photo.manual_age is not None:
-            self._age_spin.setValue(photo.manual_age)
-        elif age is not None:
-            self._age_spin.setValue(age)
-        else:
-            self._age_spin.setValue(0.0)
+            self._filename.setText(photo.original_path.name)
+            if score is not None:
+                self._match_value.setText(f"{score:.2f}")
+                self._match_bar.setValue(int(max(0.0, min(1.0, score)) * 100))
+                trusted = score >= 0.55 or has_exif
+                color = "#16A34A" if trusted else "#D97706"
+                self._match_value.setStyleSheet(f"font-weight: 700; color: {color};")
+            else:
+                self._match_value.setText("—")
+                self._match_bar.setValue(0)
 
-        conf = photo.age_confidence
-        age_text = (
-            f"{age:.1f} years old"
-            if age is not None
-            else "Age unknown"
-        )
-        if conf is not None and age is not None:
-            age_text += f" (± {conf:.1f})"
-        self._age_label.setText(age_text)
-
-        if photo.capture_date:
-            date_text = photo.capture_date.strftime("%Y-%m-%d")
-            if photo.date_reliability == DateReliability.RELIABLE_EXIF:
-                date_text += " (EXIF)"
-            elif photo.date_reliability == DateReliability.WEAK_FILESYSTEM:
-                date_text += " (filesystem)"
-        else:
-            date_text = "No date"
-        self._date_label.setText(date_text)
-        self._date_display.setText(date_text)
-
-        self._filename.setText(photo.original_path.name)
-        if score is not None:
-            self._match_value.setText(f"{score:.2f}")
-            self._match_bar.setValue(int(max(0.0, min(1.0, score)) * 100))
-            trusted = score >= 0.55 or has_exif
-            color = "#16A34A" if trusted else "#D97706"
-            self._match_value.setStyleSheet(f"font-weight: 700; color: {color};")
-        else:
-            self._match_value.setText("—")
-            self._match_bar.setValue(0)
-
-        self._sync_status_combo(photo)
+            self._sync_status_combo(photo)
+        finally:
+            self._suppress_autosave = False
 
     def _show_badge(self) -> None:
         self._badge.adjustSize()
@@ -410,32 +427,11 @@ class PhotoDetailsPanel(QWidget):
         self._badge.raise_()
 
     def _sync_status_combo(self, photo: PhotoRecord) -> None:
-        if photo.review_status == ReviewStatus.EXCLUDED:
-            key = "excluded"
-        elif photo.review_status == ReviewStatus.APPROVED:
-            key = "approved"
-        elif is_no_match_photo(photo):
-            key = "not_target"
-        elif photo.review_status in {
-            ReviewStatus.NEEDS_REVIEW,
-            ReviewStatus.LOW_CONFIDENCE,
-            ReviewStatus.PENDING,
-        }:
-            key = "needs_review" if not photo.target_found or (
-                photo.identity_score or 0
-            ) < 0.55 else "target"
-            if photo.target_found and (photo.identity_score or 0) >= 0.55:
-                key = "target"
-            elif photo.review_status in {
-                ReviewStatus.NEEDS_REVIEW,
-                ReviewStatus.LOW_CONFIDENCE,
-            }:
-                key = "needs_review"
-        else:
-            key = "target" if photo.target_found else "needs_review"
-        index = self._status_combo.findData(key)
+        index = self._status_combo.findData(self._status_key_for_photo(photo))
         if index >= 0:
+            self._status_combo.blockSignals(True)
             self._status_combo.setCurrentIndex(index)
+            self._status_combo.blockSignals(False)
 
     def _open_preview_lightbox(self) -> None:
         if self._photo is None:
@@ -481,29 +477,101 @@ class PhotoDetailsPanel(QWidget):
         saved = PhotoRepository(self._project_id).upsert(after)
         self._on_photo_applied(saved)
 
-    def _save_changes(self) -> None:
+    def _fields_match_photo(self) -> bool:
+        """True when Age/Status widgets already match the loaded photo."""
         if self._photo is None:
+            return True
+        status_key = self._status_combo.currentData()
+        age_value = float(self._age_spin.value())
+        expected_age = self._photo.manual_age
+        if expected_age is None:
+            expected_age = effective_age_for_name(self._photo, self._date_of_birth)
+        if expected_age is None:
+            age_matches = age_value == 0.0
+        else:
+            age_matches = abs(age_value - float(expected_age)) < 0.05
+
+        # Mirror _sync_status_combo so we don't rewrite identical status.
+        sync_key = self._status_key_for_photo(self._photo)
+        return age_matches and status_key == sync_key
+
+    def _status_key_for_photo(self, photo: PhotoRecord) -> str:
+        has_exif = photo.date_reliability == DateReliability.RELIABLE_EXIF
+        score = photo.identity_score
+        if photo.review_status == ReviewStatus.EXCLUDED:
+            return "excluded"
+        if photo.review_status == ReviewStatus.APPROVED:
+            return "approved"
+        if is_no_match_photo(photo):
+            return "not_target"
+        if photo.target_found and (
+            (score is not None and score >= 0.55) or has_exif
+        ):
+            return "target"
+        if photo.review_status in {
+            ReviewStatus.NEEDS_REVIEW,
+            ReviewStatus.LOW_CONFIDENCE,
+            ReviewStatus.PENDING,
+        }:
+            return "needs_review"
+        return "target" if photo.target_found else "needs_review"
+
+    def _apply_status_and_age(
+        self,
+        photo: PhotoRecord,
+        *,
+        status_key: str,
+        age_value: float,
+    ) -> None:
+        photo.manual_age = age_value
+        if status_key == "excluded":
+            photo.review_status = ReviewStatus.EXCLUDED
+        elif status_key == "approved":
+            photo.review_status = ReviewStatus.APPROVED
+            photo.target_found = True
+        elif status_key == "not_target":
+            photo.target_found = False
+            photo.review_status = ReviewStatus.TARGET_NOT_FOUND
+        elif status_key == "needs_review":
+            photo.review_status = ReviewStatus.NEEDS_REVIEW
+        else:
+            photo.target_found = True
+            photo.review_status = ReviewStatus.MANUALLY_CORRECTED
+
+    def _autosave_fields(self) -> None:
+        """Persist Age/Status as soon as the user edits them."""
+        if self._suppress_autosave or self._photo is None:
+            return
+        if self._fields_match_photo():
             return
         status_key = self._status_combo.currentData()
         age_value = float(self._age_spin.value())
+        # Only rewrite review_status when the user actually changed Status.
+        # Age-only edits must not collapse LOW_CONFIDENCE → NEEDS_REVIEW.
+        status_changed = status_key != self._status_key_for_photo(self._photo)
 
         def mutate(photo: PhotoRecord) -> None:
-            photo.manual_age = age_value
-            if status_key == "excluded":
-                photo.review_status = ReviewStatus.EXCLUDED
-            elif status_key == "approved":
-                photo.review_status = ReviewStatus.APPROVED
-                photo.target_found = True
-            elif status_key == "not_target":
-                photo.target_found = False
-                photo.review_status = ReviewStatus.TARGET_NOT_FOUND
-            elif status_key == "needs_review":
-                photo.review_status = ReviewStatus.NEEDS_REVIEW
+            if status_changed:
+                self._apply_status_and_age(
+                    photo, status_key=status_key, age_value=age_value
+                )
             else:
-                photo.target_found = True
-                photo.review_status = ReviewStatus.MANUALLY_CORRECTED
+                photo.manual_age = age_value
 
-        self._push_photo_mutation("Save photo changes", mutate)
+        self._push_photo_mutation("Edit photo fields", mutate)
+
+    def _approve_photo(self) -> None:
+        """Mark target confirmed and drop the photo out of Needs review."""
+        if self._photo is None:
+            return
+        age_value = float(self._age_spin.value())
+
+        def mutate(photo: PhotoRecord) -> None:
+            self._apply_status_and_age(
+                photo, status_key="approved", age_value=age_value
+            )
+
+        self._push_photo_mutation("Approve photo", mutate)
 
     def _on_face_clicked(self, face_id: int) -> None:
         if (

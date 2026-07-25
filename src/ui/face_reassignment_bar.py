@@ -70,6 +70,8 @@ class FaceReassignmentBar(QWidget):
             self._title.setText("Detected Faces (0)")
             self._hint.setText("No faces detected for this photo.")
             return
+        # Selected person face always first in the grid.
+        faces = sorted(faces, key=lambda f: (0 if f.is_selected_target else 1, f.id))
         self._title.setText(f"Detected Faces ({len(faces)})")
         self._hint.setText(
             "Click another detected face to change the selected identity."

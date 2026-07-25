@@ -306,15 +306,21 @@ def opencv_models_installed() -> bool:
     )
 
 
-def describe_install_status() -> list[ModelInstallStatus]:
-    """Status rows for the Settings UI."""
+def describe_install_status(*, probe_mivolo: bool = False) -> list[ModelInstallStatus]:
+    """
+    Status rows for the Settings UI.
+
+    By default uses a cheap package presence check for MiVOLO (no torch import).
+    Pass probe_mivolo=True from a background thread to also resolve CUDA/CPU.
+    """
     from src.vision.insightface_backend import insightface_available
     from src.vision.mivolo_age import (
-        mivolo_available,
         mivolo_cache_dir,
-        mivolo_import_error,
+        mivolo_deps_error,
+        mivolo_deps_present,
         mivolo_installed,
         resolve_mivolo_device,
+        warm_mivolo_imports,
     )
     from src.vision.model_catalog import list_presets
 
@@ -364,25 +370,37 @@ def describe_install_status() -> list[ModelInstallStatus]:
         )
 
     # Age backend (MiVOLO) — independent of identity pack.
-    if not mivolo_available():
+    # Avoid importing torch on the UI thread; optionally warm imports in a worker.
+    deps_ok = mivolo_deps_present()
+    if probe_mivolo and deps_ok:
+        deps_ok = warm_mivolo_imports()
+
+    if not deps_ok:
         rows.append(
             ModelInstallStatus(
                 preset_id="age_mivolo_v2",
                 title="Age: MiVOLO v2",
                 installed=False,
-                detail=f"Requires torch + transformers ({mivolo_import_error()})",
+                detail=(
+                    f"Requires torch + transformers "
+                    f"({mivolo_deps_error() or 'not installed'})"
+                ),
                 path=mivolo_cache_dir(),
             )
         )
     else:
         installed = mivolo_installed()
-        device = resolve_mivolo_device()
+        device = resolve_mivolo_device(probe=probe_mivolo)
         size_mb = _dir_size(mivolo_cache_dir()) / (1024 * 1024)
+        if device == "pending":
+            device_note = "device check pending"
+        else:
+            device_note = f"device: {device}"
         if installed:
-            detail = f"Installed ({size_mb:.0f} MB) — device: {device}"
+            detail = f"Installed ({size_mb:.0f} MB) — {device_note}"
         else:
             detail = (
-                f"Deps OK (device: {device}); weights download on first use "
+                f"Deps OK ({device_note}); weights download on first use "
                 "or via Download Selected"
             )
         rows.append(

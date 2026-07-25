@@ -5,7 +5,7 @@ from __future__ import annotations
 from src.settings.app_settings import AppSettings
 from src.vision.age_backends import AgeBackendId
 from src.vision.model_catalog import ModelPresetId
-from src.vision.mivolo_age import mivolo_available
+from src.vision.mivolo_age import mivolo_available, mivolo_deps_present
 
 
 def test_fingerprint_includes_age_backend() -> None:
@@ -24,3 +24,7 @@ def test_fingerprint_includes_age_backend() -> None:
 
 def test_mivolo_available_is_bool() -> None:
     assert isinstance(mivolo_available(), bool)
+
+
+def test_mivolo_deps_present_is_bool() -> None:
+    assert isinstance(mivolo_deps_present(), bool)

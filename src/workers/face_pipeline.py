@@ -583,12 +583,11 @@ class FaceAnalysisPipeline:
             per_face_confidence.append(face_conf)
 
         # Photo stores the selected face's raw AI age; DOB ceiling applies in scoring.
+        # Also keep age for hard no-matches so the timeline can label the face
+        # without requiring a manual face click.
         estimated_age: float | None = None
         age_confidence: float | None = None
-        if (
-            match.best_face_index is not None
-            and (match.target_found or match.low_confidence)
-        ):
+        if match.best_face_index is not None:
             raw_selected = per_face_ages[match.best_face_index]
             raw_conf = per_face_confidence[match.best_face_index]
             if raw_selected is not None:

@@ -5,13 +5,14 @@ from __future__ import annotations
 import os
 import sys
 
-from PySide6.QtCore import QProcess, QSettings, QSize, Qt, QThread
-from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QUndoStack
+from PySide6.QtCore import QObject, QProcess, QSettings, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QAction, QCloseEvent, QKeySequence, QShowEvent, QUndoStack
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QMainWindow,
     QStackedWidget,
     QStatusBar,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -25,7 +26,6 @@ from src.ui.dashboard_page import DashboardPage
 from src.ui.export_complete_dialog import ExportCompleteDialog
 from src.ui.export_dialog import ExportDialog
 from src.ui.project_setup_dialog import ProjectSetupPage
-from src.ui.settings_dialog import SettingsPage
 from src.ui.sidebar import AppSidebar
 from src.ui.welcome_view import WelcomeView, _format_last_opened
 from src.ui.message_dialog import ChoiceDialog, MessageDialog
@@ -49,6 +49,22 @@ _PAGE_SETTINGS = 2
 _PAGE_SETUP = 3
 
 
+class _VisionWarmWorker(QObject):
+    """Preload torch / MiVOLO imports so first Analyze or Settings probe is faster."""
+
+    finished = Signal()
+
+    def run(self) -> None:
+        try:
+            from src.vision.mivolo_age import mivolo_deps_present, warm_mivolo_imports
+
+            if mivolo_deps_present():
+                warm_mivolo_imports()
+        except Exception:  # noqa: BLE001
+            pass
+        self.finished.emit()
+
+
 class MainWindow(QMainWindow):
     """Top-level shell: sidebar + projects list + project dashboard."""
 
@@ -69,6 +85,9 @@ class MainWindow(QMainWindow):
         self._undo_stack = QUndoStack(self)
         self._undo_stack.setUndoLimit(100)
         self._undo_stack.indexChanged.connect(self._on_undo_index_changed)
+        self._settings_page = None  # built lazily — avoids torch at startup
+        self._warm_thread: QThread | None = None
+        self._warm_started = False
 
         self._build_menu()
         self._build_ui()
@@ -190,9 +209,11 @@ class MainWindow(QMainWindow):
         self._dashboard.status_message.connect(self.statusBar().showMessage)
         self._dashboard.processing_bar.cancel_requested.connect(self._cancel_scan)
 
-        self._settings_page = SettingsPage()
-        self._settings_page.settings_saved.connect(self._on_settings_saved)
-        self._settings_page.cancelled.connect(self._on_settings_cancelled)
+        # Settings is created on first open so startup skips torch / MiVOLO probes.
+        self._settings_host = QWidget()
+        self._settings_host_layout = QVBoxLayout(self._settings_host)
+        self._settings_host_layout.setContentsMargins(0, 0, 0, 0)
+        self._settings_host_layout.setSpacing(0)
         self._settings_return_page = _PAGE_PROJECTS
 
         self._setup_page = ProjectSetupPage()
@@ -205,7 +226,7 @@ class MainWindow(QMainWindow):
         self._stack = QStackedWidget()
         self._stack.addWidget(self._welcome_view)
         self._stack.addWidget(self._dashboard)
-        self._stack.addWidget(self._settings_page)
+        self._stack.addWidget(self._settings_host)
         self._stack.addWidget(self._setup_page)
 
         content = QWidget()
@@ -747,6 +768,43 @@ class MainWindow(QMainWindow):
         settings = load_settings()
         self._welcome_view.set_privacy_banner_visible(settings.show_privacy_banner)
 
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
+        super().showEvent(event)
+        if not self._warm_started:
+            self._warm_started = True
+            # Let the first paint finish, then warm ML imports in the background.
+            QTimer.singleShot(250, self._start_vision_warm)
+
+    def _start_vision_warm(self) -> None:
+        if self._warm_thread is not None:
+            return
+        thread = QThread(self)
+        worker = _VisionWarmWorker()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_warm_thread)
+        self._warm_thread = thread
+        thread.start()
+
+    def _clear_warm_thread(self) -> None:
+        self._warm_thread = None
+
+    def _ensure_settings_page(self):
+        """Create SettingsPage on first use (keeps startup free of torch imports)."""
+        if self._settings_page is not None:
+            return self._settings_page
+        from src.ui.settings_dialog import SettingsPage
+
+        page = SettingsPage()
+        page.settings_saved.connect(self._on_settings_saved)
+        page.cancelled.connect(self._on_settings_cancelled)
+        self._settings_host_layout.addWidget(page)
+        self._settings_page = page
+        return page
+
     def open_settings(self) -> None:
         if self._is_busy():
             MessageDialog.warning(self, "Busy", "Wait for the current task to finish.")
@@ -758,7 +816,8 @@ class MainWindow(QMainWindow):
         current = self._stack.currentIndex()
         if current != _PAGE_SETTINGS:
             self._settings_return_page = current
-        self._settings_page.reload()
+        page = self._ensure_settings_page()
+        page.reload()
         self._stack.setCurrentIndex(_PAGE_SETTINGS)
         self._sidebar.set_active("settings")
 

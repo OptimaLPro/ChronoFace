@@ -99,9 +99,11 @@ def effective_age_for_name(
 ) -> float | None:
     if photo.manual_age is not None:
         return float(photo.manual_age)
-    # No-match photos are not the target person — do not invent an age from
-    # DOB/filesystem/face estimates (e.g. dogs scored 0.02 must not show 12.6y).
+    # No-match: still show the selected face's AI age on the timeline, but do
+    # not invent chronology from DOB/capture date (e.g. dog must not show 12.6y).
     if is_no_match_photo(photo):
+        if photo.estimated_age is not None:
+            return float(photo.estimated_age)
         return None
     if photo.age_from_dob is not None:
         return float(photo.age_from_dob)

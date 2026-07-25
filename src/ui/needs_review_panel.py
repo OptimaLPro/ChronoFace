@@ -108,12 +108,22 @@ def categorize_review_photo(
     if is_no_match_photo(photo):
         return ReviewCategory.NOT_FOUND
 
+    # Reliable EXIF + known age → chronology is trusted; skip Needs review
+    # (including multi-face / low-score matches that only needed age confirmation).
+    if _has_reliable_exif(photo) and (
+        photo.target_found
+        or photo.review_status
+        in {
+            ReviewStatus.LOW_CONFIDENCE,
+            ReviewStatus.NEEDS_REVIEW,
+            ReviewStatus.MANUALLY_CORRECTED,
+        }
+    ):
+        if effective_age_for_name(photo, date_of_birth) is None:
+            return ReviewCategory.UNKNOWN_AGE
+        return None
+
     if photo.review_status == ReviewStatus.LOW_CONFIDENCE:
-        # Reliable EXIF age outweighs a weak face match — treat as resolved.
-        if _has_reliable_exif(photo):
-            if effective_age_for_name(photo, date_of_birth) is None:
-                return ReviewCategory.UNKNOWN_AGE
-            return None
         quality = photo.face_quality
         if quality is not None and quality < 0.35:
             return ReviewCategory.LOW_QUALITY
@@ -130,9 +140,6 @@ def categorize_review_photo(
 
     score = photo.identity_score
     if score is not None and score < 0.55:
-        # Low face score + EXIF date → trusted chronological match, not review.
-        if _has_reliable_exif(photo):
-            return None
         return ReviewCategory.LOW_MATCH
 
     return None

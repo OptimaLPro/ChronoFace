@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 from typing import Any
 
@@ -16,16 +17,31 @@ logger = get_logger("vision.mivolo_age")
 
 MIVOLO_HF_ID = "iitolstykh/mivolo_v2"
 
+# Packages required for MiVOLO — importing them is slow; prefer find_spec for UI.
+_MIVOLO_DEP_NAMES = ("torch", "transformers", "torchvision", "mivolo", "timm")
+
+# Lazy: importing torch at module load makes app startup several seconds slower.
+torch = None  # type: ignore[assignment]
 _IMPORT_ERROR: str | None = None
-try:
-    import torch
-except Exception as exc:  # noqa: BLE001
-    torch = None  # type: ignore[assignment]
-    _IMPORT_ERROR = f"torch not available: {exc}"
+
+
+def mivolo_deps_present() -> bool:
+    """True when MiVOLO packages are installed (no heavy imports)."""
+    return all(importlib.util.find_spec(name) is not None for name in _MIVOLO_DEP_NAMES)
+
+
+def mivolo_deps_error() -> str | None:
+    """Human-readable missing-package note without importing torch."""
+    missing = [
+        name for name in _MIVOLO_DEP_NAMES if importlib.util.find_spec(name) is None
+    ]
+    if not missing:
+        return None
+    return "Missing packages: " + ", ".join(missing)
 
 
 def _ensure_torch() -> bool:
-    """Import torch, retrying after an in-app pip install."""
+    """Import torch on first use (retryable after an in-app pip install)."""
     global torch, _IMPORT_ERROR
     if torch is not None:
         return True
@@ -41,6 +57,7 @@ def _ensure_torch() -> bool:
 
 
 def mivolo_available() -> bool:
+    """Import and verify MiVOLO deps. Slow on first call — avoid on UI thread at boot."""
     if not _ensure_torch():
         return False
     try:
@@ -53,7 +70,23 @@ def mivolo_available() -> bool:
     return True
 
 
-def mivolo_import_error() -> str | None:
+def warm_mivolo_imports() -> bool:
+    """Preload torch / MiVOLO deps (safe to call from a background thread)."""
+    return mivolo_available()
+
+
+def mivolo_import_error(*, probe: bool = False) -> str | None:
+    """
+    Explain why MiVOLO is unavailable.
+
+    Default is a cheap package-presence check (safe on the UI thread).
+    Pass probe=True to actually import packages (slow; background only).
+    """
+    cheap = mivolo_deps_error()
+    if cheap is not None:
+        return cheap
+    if not probe:
+        return None
     if not _ensure_torch():
         return (
             _IMPORT_ERROR
@@ -93,9 +126,19 @@ def mivolo_installed() -> bool:
     return False
 
 
-def resolve_mivolo_device() -> str:
+def resolve_mivolo_device(*, probe: bool = False) -> str:
+    """
+    Return preferred MiVOLO device.
+
+    When torch is not loaded yet, returns \"pending\" unless probe=True
+    (probe may import torch and is not suitable for the UI thread at boot).
+    """
     if torch is None:
-        return "cpu"
+        if not probe:
+            return "pending"
+        if not _ensure_torch():
+            return "cpu"
+    assert torch is not None
     if torch.cuda.is_available():
         return "cuda"
     return "cpu"

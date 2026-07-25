@@ -18,15 +18,18 @@ from PySide6.QtWidgets import (
 )
 
 from src.commands import BulkPhotosSnapshotCommand, copy_photos
+from src.database.face_repository import FaceRepository
 from src.database.photo_repository import PhotoRepository
 from src.database.repository import ProjectRepository
 from src.domain.match_status import is_no_match_photo
 from src.domain.models import DateReliability, PhotoRecord, ProjectConfig, ReviewStatus
 from src.metadata.age_from_dob import age_from_dob_and_capture
 from src.settings.app_settings import load_settings, save_settings
+from src.sorting.duplicates import find_exact_duplicates
 from src.sorting.ranking import rank_photo_records
 from src.sorting.scoring import apply_sort_decision, decide_sort_for_record
 from src.ui.age_band_bar import AgeBandBar
+from src.ui.duplicates_dialog import DuplicatesDialog
 from src.ui.metric_card import MetricsRow
 from src.ui.needs_review_panel import NeedsReviewPanel, photos_needing_review
 from src.ui.photo_details_panel import PhotoDetailsPanel
@@ -110,6 +113,13 @@ class DashboardPage(QWidget):
         )
         self._rotator_btn.toggled.connect(self._set_rotator_mode)
 
+        self._duplicates_btn = QPushButton("Duplicates")
+        self._duplicates_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._duplicates_btn.setToolTip(
+            "Scan for identical file copies (SHA-256) and remove extras from the project."
+        )
+        self._duplicates_btn.clicked.connect(self.scan_duplicates)
+
         self._save_order_btn = QPushButton("Save Order")
         self._save_order_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._save_order_btn.clicked.connect(self.save_order)
@@ -145,6 +155,7 @@ class DashboardPage(QWidget):
         toolbar.addWidget(self._timeline_view_btn, 0, vcenter)
         toolbar.addWidget(self._grid_view_btn, 0, vcenter)
         toolbar.addWidget(self._rotator_btn, 0, vcenter)
+        toolbar.addWidget(self._duplicates_btn, 0, vcenter)
         toolbar.addWidget(self._save_order_btn, 0, vcenter)
         toolbar.addWidget(self._rerank_btn, 0, vcenter)
 
@@ -249,6 +260,7 @@ class DashboardPage(QWidget):
         self._save_order_btn.setEnabled(has)
         self._rerank_btn.setEnabled(has)
         self._rotator_btn.setEnabled(has)
+        self._duplicates_btn.setEnabled(has)
         if not has and self._rotator_mode:
             self._set_rotator_mode(False)
 
@@ -257,13 +269,21 @@ class DashboardPage(QWidget):
             return
         photos = self._repo.list_photos()
         dob = self._project.date_of_birth
-        # Drop stale ages for hard no-matches so they leave the age timeline.
+        face_repo = FaceRepository(self._project.id)
+        # Drop DOB-based sort placement for hard no-matches, but keep/backfill
+        # the selected face AI age so thumbnails are not stuck on "Unknown".
         for photo in photos:
+            if not is_no_match_photo(photo):
+                continue
             if (
-                is_no_match_photo(photo)
-                and photo.manual_order is None
-                and photo.manual_age is None
+                photo.estimated_age is None
+                and photo.selected_face_id is not None
             ):
+                face = face_repo.get_face(photo.selected_face_id)
+                if face is not None and face.estimated_age is not None:
+                    photo.estimated_age = float(face.estimated_age)
+                    self._repo.upsert(photo)
+            if photo.manual_order is None and photo.manual_age is None:
                 decision = decide_sort_for_record(photo, date_of_birth=dob)
                 apply_sort_decision(photo, decision, date_of_birth=dob)
         photos = sorted(
@@ -290,10 +310,20 @@ class DashboardPage(QWidget):
         stats["needs_review_total"] = len(
             photos_needing_review(self._photos, dob)
         )
-        # Count hard no-matches by score/status, not only TARGET_NOT_FOUND rows.
-        # Score 0.02 dog/object faces must increment Not found.
+        # Align cards with High / Low / No match badges (not raw SQL flags).
+        # Save Order stamps manually_corrected on everyone — score/target still decide.
         stats["target_not_found"] = sum(
             1 for photo in self._photos if is_no_match_photo(photo)
+        )
+        stats["target_found"] = sum(
+            1
+            for photo in self._photos
+            if photo.review_status != ReviewStatus.EXCLUDED
+            and not is_no_match_photo(photo)
+            and (
+                photo.target_found
+                or photo.review_status == ReviewStatus.LOW_CONFIDENCE
+            )
         )
         # Only count reliable EXIF capture dates — not filesystem mtime guesses.
         stats["with_dates"] = stats.get("reliable_date", 0)
@@ -459,6 +489,82 @@ class DashboardPage(QWidget):
                 break
         self._needs_review.set_photos(self._photos)
         self._refresh_metrics()
+
+    def scan_duplicates(self) -> None:
+        """Scan project for exact content duplicates; offer soft-remove."""
+        if self._repo is None or self._project is None:
+            return
+        photos = self._repo.list_photos()
+        result = find_exact_duplicates(photos)
+        if not result.has_duplicates:
+            note = ""
+            if result.skipped_no_hash:
+                note = (
+                    f"\n\n{result.skipped_no_hash} photo(s) had no content hash "
+                    "yet — run Analyze Photos so they can be checked."
+                )
+            MessageDialog.success(
+                self,
+                "No Duplicates",
+                "No identical file copies found among active photos." + note,
+            )
+            return
+
+        dialog = DuplicatesDialog(result, self.window())
+        if dialog.exec() != DuplicatesDialog.Remove:
+            return
+        self._exclude_duplicate_photos(
+            dialog.removable_photos(),
+            group_count=dialog.group_count(),
+        )
+
+    def _exclude_duplicate_photos(
+        self,
+        removable: list[PhotoRecord],
+        *,
+        group_count: int,
+    ) -> None:
+        if self._repo is None or self._project is None:
+            return
+        if not removable:
+            return
+
+        removable_ids = {photo.id for photo in removable if photo.id is not None}
+        before = copy_photos(
+            [photo for photo in self._repo.list_photos() if photo.id in removable_ids]
+        )
+        after = copy_photos(before)
+        for photo in after:
+            photo.review_status = ReviewStatus.EXCLUDED
+
+        def on_applied(_photos: list[PhotoRecord]) -> None:
+            self.reload()
+
+        if self._undo_stack is not None:
+            self._undo_stack.push(
+                BulkPhotosSnapshotCommand(
+                    self._project.id,
+                    before,
+                    after,
+                    f"Remove {len(after)} duplicate(s)",
+                    on_applied=on_applied,
+                )
+            )
+        else:
+            for photo in after:
+                self._repo.upsert(photo)
+            on_applied(after)
+
+        self.status_message.emit(
+            f"Removed {len(after)} duplicate(s) from project "
+            f"({group_count} group(s))"
+        )
+        MessageDialog.success(
+            self,
+            "Duplicates Removed",
+            f"Removed {len(after)} duplicate photo(s) from the project.\n"
+            "Original files are still on disk. Use Undo to restore.",
+        )
 
     def save_order(self) -> None:
         if self._repo is None or self._project is None:

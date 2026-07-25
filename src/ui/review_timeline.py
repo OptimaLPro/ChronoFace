@@ -180,7 +180,15 @@ def _matches_filter(
         # Soft-removed photos live under the Excluded filter only.
         return photo.review_status != ReviewStatus.EXCLUDED
     if review_filter == ReviewFilter.TARGET_FOUND:
-        return bool(photo.target_found) and photo.review_status != ReviewStatus.EXCLUDED
+        # Same set as the Target found metric card (High match + Low match).
+        return (
+            photo.review_status != ReviewStatus.EXCLUDED
+            and not is_no_match_photo(photo)
+            and (
+                bool(photo.target_found)
+                or photo.review_status == ReviewStatus.LOW_CONFIDENCE
+            )
+        )
     if review_filter == ReviewFilter.NEEDS_REVIEW:
         # Same queue as the Needs review metric / panel.
         return categorize_review_photo(photo, date_of_birth) is not None

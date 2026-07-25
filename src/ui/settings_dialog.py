@@ -29,7 +29,11 @@ from src.vision.age_backends import (
     list_age_backends,
 )
 from src.vision.insightface_backend import insightface_available, insightface_import_error
-from src.vision.mivolo_age import mivolo_available, mivolo_import_error
+from src.vision.mivolo_age import (
+    mivolo_available,
+    mivolo_deps_error,
+    mivolo_deps_present,
+)
 from src.vision.mivolo_install import install_mivolo_dependencies
 from src.vision.model_catalog import (
     BackendFamily,
@@ -65,6 +69,27 @@ class _PipInstallWorker(QObject):
         self.finished.emit()
 
 
+class _InstallStatusWorker(QObject):
+    """Probe model install status off the UI thread (may import torch)."""
+
+    finished = Signal(str)
+    failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            # probe_mivolo imports torch / reports CUDA — keep off the UI thread.
+            lines: list[str] = []
+            for row in describe_install_status(probe_mivolo=True):
+                mark = "✓" if row.installed else "○"
+                lines.append(f"{mark} {row.title}\n   {row.detail}")
+                if row.path is not None:
+                    lines.append(f"   Path: {row.path}")
+                lines.append("")
+            self.finished.emit("\n".join(lines).strip())
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+
+
 class SettingsPage(QWidget):
     """Let the user pick model packs and matching thresholds."""
 
@@ -79,6 +104,9 @@ class SettingsPage(QWidget):
         self._settings = load_settings()
         self._result: AppSettings | None = None
         self._nav_buttons: list[QPushButton] = []
+        self._status_thread: QThread | None = None
+        self._status_worker: _InstallStatusWorker | None = None
+        self._status_generation = 0
 
         title = QLabel("Settings")
         title.setObjectName("titleLabel")
@@ -373,6 +401,7 @@ class SettingsPage(QWidget):
         layout.addWidget(intro)
         layout.addWidget(self._status_box, stretch=1)
         layout.addWidget(row_host)
+        # Cheap status now; CUDA / torch probe continues in a background worker.
         self._refresh_download_status()
         return page
 
@@ -480,16 +509,13 @@ class SettingsPage(QWidget):
                 "(InsightFace). Click Save Settings — ChronoFace can install it "
                 f"for you.\n({err})"
             )
-        if (
-            age.id == AgeBackendId.MIVOLO_V2
-            and not mivolo_available()
-        ):
+        if age.id == AgeBackendId.MIVOLO_V2 and not mivolo_deps_present():
             hints.append(
                 "The better age model needs a few extra pieces "
                 "(PyTorch and related tools). Click Save Settings — ChronoFace "
                 "can download and install them for you "
                 "(needs internet; may take several minutes).\n"
-                f"({mivolo_import_error()})"
+                f"({mivolo_deps_error() or 'not installed'})"
             )
         hint_text = "\n\n".join(hints)
         self._insight_hint.setText(hint_text)
@@ -507,15 +533,68 @@ class SettingsPage(QWidget):
             self._match_spin.setValue(preset.default_match_threshold)
             self._low_spin.setValue(preset.default_low_confidence_threshold)
 
-    def _refresh_download_status(self) -> None:
-        lines = []
-        for row in describe_install_status():
+    @staticmethod
+    def _format_install_status(*, probe_mivolo: bool) -> str:
+        lines: list[str] = []
+        for row in describe_install_status(probe_mivolo=probe_mivolo):
             mark = "✓" if row.installed else "○"
             lines.append(f"{mark} {row.title}\n   {row.detail}")
             if row.path is not None:
                 lines.append(f"   Path: {row.path}")
             lines.append("")
-        self._status_box.setPlainText("\n".join(lines).strip())
+        return "\n".join(lines).strip()
+
+    def _refresh_download_status(self) -> None:
+        """Show cheap status now; refine CUDA/torch details in a background worker."""
+        if not hasattr(self, "_status_box"):
+            return
+
+        # Instant filesystem / package-presence status (no torch import).
+        try:
+            self._status_box.setPlainText(
+                self._format_install_status(probe_mivolo=False)
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._status_box.setPlainText(f"Could not read model status.\n{exc}")
+
+        if self._status_thread is not None and self._status_thread.isRunning():
+            return
+
+        self._status_generation += 1
+        generation = self._status_generation
+
+        thread = QThread(self)
+        worker = _InstallStatusWorker()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(
+            lambda text, gen=generation: self._on_status_ready(gen, text)
+        )
+        worker.failed.connect(
+            lambda err, gen=generation: self._on_status_failed(gen, err)
+        )
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_status_thread)
+        self._status_thread = thread
+        self._status_worker = worker
+        thread.start()
+
+    def _clear_status_thread(self) -> None:
+        self._status_thread = None
+        self._status_worker = None
+
+    def _on_status_ready(self, generation: int, text: str) -> None:
+        if generation != self._status_generation:
+            return
+        self._status_box.setPlainText(text or "No model status available.")
+
+    def _on_status_failed(self, generation: int, error: str) -> None:
+        if generation != self._status_generation:
+            return
+        self._status_box.setPlainText(f"Could not read model status.\n{error}")
 
     def _download_selected(self) -> None:
         preset = self._selected_preset()
