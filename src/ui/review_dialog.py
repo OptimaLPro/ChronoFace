@@ -52,6 +52,7 @@ class _SinglePhotoWorker(QObject):
 
     progress = Signal(int, int, str)
     finished = Signal(list)  # list[PhotoRecord]
+    cancelled = Signal()
     error = Signal(str)
 
     def __init__(
@@ -67,6 +68,10 @@ class _SinglePhotoWorker(QObject):
         self._reference_photos = list(reference_photos)
         self._date_of_birth = date_of_birth
         self._photo_ids = list(photo_ids)
+        self._cancel_requested = False
+
+    def request_cancel(self) -> None:
+        self._cancel_requested = True
 
     def run(self) -> None:
         try:
@@ -83,7 +88,11 @@ class _SinglePhotoWorker(QObject):
                 on_progress=lambda current, total, message: self.progress.emit(
                     current, total, message
                 ),
+                should_cancel=lambda: self._cancel_requested,
             )
+            if self._cancel_requested:
+                self.cancelled.emit()
+                return
             self.finished.emit(updated)
         except Exception as exc:  # noqa: BLE001
             self.error.emit(str(exc).strip() or type(exc).__name__)
@@ -595,9 +604,11 @@ class ReviewDialog(QDialog):
             label=self._reanalyze_progress_text(0, total, "Starting…"),
             minimum=0,
             maximum=total,
+            cancellable=True,
         )
         progress.setMinimumWidth(480)
         progress.setValue(0)
+        progress.cancelled.connect(self._cancel_single_analysis)
         progress.show()
         self._progress = progress
 
@@ -612,8 +623,10 @@ class ReviewDialog(QDialog):
         thread.started.connect(worker.run)
         worker.progress.connect(self._on_single_progress)
         worker.finished.connect(self._on_single_finished)
+        worker.cancelled.connect(self._on_single_cancelled)
         worker.error.connect(self._on_single_error)
         worker.finished.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
         worker.error.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(self._on_single_thread_finished)
@@ -658,6 +671,13 @@ class ReviewDialog(QDialog):
             self._reanalyze_progress_text(current, total, message)
         )
 
+    def _cancel_single_analysis(self) -> None:
+        if self._worker is not None:
+            self._worker.request_cancel()
+        if self._progress is not None:
+            self._progress.setLabelText("Cancel requested…")
+            self._progress.setCancelEnabled(False)
+
     def _on_single_finished(self, _updated: list) -> None:
         if self._progress is not None:
             self._progress.close()
@@ -673,6 +693,22 @@ class ReviewDialog(QDialog):
             self,
             "Analysis Complete",
             "Finished re-analyzing the selected photo(s).",
+        )
+
+    def _on_single_cancelled(self) -> None:
+        if self._progress is not None:
+            self._progress.close()
+            self._progress = None
+        if self._undo_stack is not None:
+            self._undo_stack.clear()
+        self.reload()
+        selected = self._timeline.selected_photos()
+        if selected:
+            self._details.set_photo(selected[0])
+        MessageDialog.information(
+            self,
+            "Analysis Cancelled",
+            "Re-analysis stopped. Progress already completed was saved.",
         )
 
     def _on_single_error(self, message: str) -> None:

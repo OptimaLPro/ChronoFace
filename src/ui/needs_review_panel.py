@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.domain.models import DateReliability, PhotoRecord, ReviewStatus
+from src.domain.match_status import is_no_match_photo
 from src.export.file_exporter import effective_age_for_name
 from src.ui.thumbnail_loader import load_thumbnail_pixmap
 
@@ -100,10 +101,12 @@ def categorize_review_photo(
 
     if photo.review_status == ReviewStatus.NO_FACE:
         return ReviewCategory.NO_CLEAR_FACE
-    if photo.review_status == ReviewStatus.TARGET_NOT_FOUND:
-        return ReviewCategory.NOT_FOUND
     if photo.review_status == ReviewStatus.ERROR:
         return ReviewCategory.NO_CLEAR_FACE
+    # Hard no-match (score below low-confidence floor, or TARGET_NOT_FOUND).
+    # Must win over "Low match" so dog/object faces with 0.02 count as Not found.
+    if is_no_match_photo(photo):
+        return ReviewCategory.NOT_FOUND
 
     if photo.review_status == ReviewStatus.LOW_CONFIDENCE:
         # Reliable EXIF age outweighs a weak face match — treat as resolved.
@@ -131,8 +134,6 @@ def categorize_review_photo(
         if _has_reliable_exif(photo):
             return None
         return ReviewCategory.LOW_MATCH
-    if photo.review_status == ReviewStatus.PENDING and not photo.target_found:
-        return ReviewCategory.NOT_FOUND
 
     return None
 

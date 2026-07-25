@@ -378,6 +378,7 @@ class SettingsPage(QWidget):
 
     def _build_general_tab(self) -> QWidget:
         self._privacy_banner = QCheckBox("Show privacy banner on the welcome screen")
+        self._rotator_help = QCheckBox("Show Photo Rotator instructions when enabling Rotator")
         self._verbose = QCheckBox("Verbose logging")
 
         about_title = QLabel("About model licenses")
@@ -398,7 +399,11 @@ class SettingsPage(QWidget):
             "}"
         )
         return self._section_card(
-            self._privacy_banner, self._verbose, about_title, about_text
+            self._privacy_banner,
+            self._rotator_help,
+            self._verbose,
+            about_title,
+            about_text,
         )
 
     def _populate_from_settings(self) -> None:
@@ -433,6 +438,7 @@ class SettingsPage(QWidget):
         self._det_size.setValue(settings.det_size)
         self._force_reprocess.setChecked(settings.force_reprocess_after_model_change)
         self._privacy_banner.setChecked(settings.show_privacy_banner)
+        self._rotator_help.setChecked(settings.show_rotator_help)
         self._verbose.setChecked(settings.log_verbose)
         self._on_preset_changed()
 
@@ -724,6 +730,7 @@ class SettingsPage(QWidget):
             force_reprocess_after_model_change=self._force_reprocess.isChecked(),
             last_model_fingerprint=self._settings.last_model_fingerprint,
             show_privacy_banner=self._privacy_banner.isChecked(),
+            show_rotator_help=self._rotator_help.isChecked(),
             log_verbose=self._verbose.isChecked(),
         )
 

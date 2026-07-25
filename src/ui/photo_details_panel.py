@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 from src.commands import FaceReassignCommand, PhotoSnapshotCommand, copy_photo
 from src.database.face_repository import FaceRepository
 from src.database.photo_repository import PhotoRepository
+from src.domain.match_status import is_no_match_photo
 from src.domain.models import DateReliability, PhotoRecord, ReviewStatus
 from src.export.file_exporter import effective_age_for_name
 from src.services.identity_correction import IdentityCorrectionService
@@ -309,12 +310,16 @@ class PhotoDetailsPanel(QWidget):
 
         score = photo.identity_score
         has_exif = photo.date_reliability == DateReliability.RELIABLE_EXIF
+        no_match = is_no_match_photo(photo)
         # EXIF date makes age trustworthy — treat as high match even if face score is low.
-        is_high_match = photo.target_found and (
-            (score is not None and score >= 0.55) or has_exif
+        is_high_match = (
+            not no_match
+            and photo.target_found
+            and ((score is not None and score >= 0.55) or has_exif)
         )
         is_low_match = (
-            not is_high_match
+            not no_match
+            and not is_high_match
             and photo.target_found
             and (
                 photo.review_status == ReviewStatus.LOW_CONFIDENCE
@@ -339,7 +344,7 @@ class PhotoDetailsPanel(QWidget):
                 "}"
             )
             self._show_badge()
-        elif not photo.target_found:
+        elif no_match or not photo.target_found:
             self._badge.setText("No match")
             self._badge.setStyleSheet(
                 "QLabel {"
@@ -409,7 +414,7 @@ class PhotoDetailsPanel(QWidget):
             key = "excluded"
         elif photo.review_status == ReviewStatus.APPROVED:
             key = "approved"
-        elif photo.review_status == ReviewStatus.TARGET_NOT_FOUND:
+        elif is_no_match_photo(photo):
             key = "not_target"
         elif photo.review_status in {
             ReviewStatus.NEEDS_REVIEW,

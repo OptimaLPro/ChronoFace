@@ -9,7 +9,9 @@ from PIL import Image
 from src.domain.models import PhotoRecord, ReviewStatus
 from src.export.csv_exporter import export_csv_report
 from src.export.file_exporter import (
+    AgeRangeFolder,
     ExportOptions,
+    age_range_subfolder,
     build_export_filename,
     export_numbered_copies,
     sanitize_filename,
@@ -81,6 +83,77 @@ def test_export_numbered_copies_and_csv(tmp_path: Path) -> None:
     text = csv_path.read_text(encoding="utf-8")
     assert "output_order" in text
     assert "young.jpg" in text
+
+
+def test_age_range_subfolder_routing() -> None:
+    ranges = [
+        AgeRangeFolder(0, 2),
+        AgeRangeFolder(3, 7),
+        AgeRangeFolder(8, 10),
+    ]
+    young = PhotoRecord(
+        project_id="p",
+        original_path=Path("a.jpg"),
+        estimated_age=1.4,
+        target_found=True,
+    )
+    mid = PhotoRecord(
+        project_id="p",
+        original_path=Path("b.jpg"),
+        estimated_age=5.0,
+        target_found=True,
+    )
+    outside = PhotoRecord(
+        project_id="p",
+        original_path=Path("c.jpg"),
+        estimated_age=15.0,
+        target_found=True,
+    )
+    unknown = PhotoRecord(
+        project_id="p",
+        original_path=Path("d.jpg"),
+        estimated_age=None,
+        target_found=True,
+        review_status=ReviewStatus.NO_FACE,
+    )
+
+    assert age_range_subfolder(young, ranges) == "0-2"
+    assert age_range_subfolder(mid, ranges) == "3-7"
+    assert age_range_subfolder(outside, ranges) == "_other"
+    assert age_range_subfolder(unknown, []) is None
+    # No-match photos have no exportable age → _unknown when ranges set.
+    assert age_range_subfolder(unknown, ranges) == "_unknown"
+
+
+def test_export_into_age_range_folders(tmp_path: Path) -> None:
+    input_dir = tmp_path / "in"
+    output_dir = tmp_path / "out"
+    input_dir.mkdir()
+
+    toddler = _photo(input_dir, "toddler.jpg", age=1.0, target=True)
+    child = _photo(input_dir, "child.jpg", age=5.0, target=True)
+    teen = _photo(input_dir, "teen.jpg", age=12.0, target=True)
+
+    result = export_numbered_copies(
+        [toddler, child, teen],
+        ExportOptions(
+            output_dir=output_dir,
+            include_age_in_name=True,
+            export_unresolved_separate=False,
+            export_excluded_separate=False,
+            write_csv=False,
+            age_range_folders=[
+                AgeRangeFolder(0, 2),
+                AgeRangeFolder(3, 7),
+            ],
+        ),
+    )
+
+    assert result.exported_main == 3
+    assert (output_dir / "0-2" / "0001_age_01_toddler.jpg").is_file()
+    assert (output_dir / "3-7" / "0002_age_05_child.jpg").is_file()
+    assert (output_dir / "_other" / "0003_age_12_teen.jpg").is_file()
+    assert list(output_dir.glob("*.jpg")) == []
 
 
 def test_export_skips_excluded_photos(tmp_path: Path) -> None:

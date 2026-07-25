@@ -9,6 +9,7 @@ from datetime import date
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from src.domain.match_status import is_no_match_photo
 from src.domain.models import PhotoRecord, ReviewStatus
 from src.metadata.age_from_dob import clamp_age_to_dob
 from src.sorting.grouping import age_group_label
@@ -17,6 +18,29 @@ from src.utils.logging import get_logger
 logger = get_logger("export.file_exporter")
 
 ProgressCallback = Callable[[int, int, str], None]
+
+
+@dataclass(frozen=True)
+class AgeRangeFolder:
+    """Inclusive age band that becomes a subfolder under the export root."""
+
+    min_age: int
+    max_age: int
+
+    def __post_init__(self) -> None:
+        if self.min_age < 0 or self.max_age < 0:
+            raise ValueError("Age range bounds must be non-negative")
+        if self.min_age > self.max_age:
+            raise ValueError(
+                f"Invalid age range: min ({self.min_age}) > max ({self.max_age})"
+            )
+
+    @property
+    def folder_name(self) -> str:
+        return f"{self.min_age}-{self.max_age}"
+
+    def contains(self, age: int) -> bool:
+        return self.min_age <= age <= self.max_age
 
 
 @dataclass
@@ -31,6 +55,8 @@ class ExportOptions:
     export_excluded_separate: bool = True
     write_csv: bool = True
     only_target_found: bool = True
+    # When non-empty, main photos go into age-band subfolders (e.g. 0-2/).
+    age_range_folders: list[AgeRangeFolder] = field(default_factory=list)
 
 
 @dataclass
@@ -73,6 +99,10 @@ def effective_age_for_name(
 ) -> float | None:
     if photo.manual_age is not None:
         return float(photo.manual_age)
+    # No-match photos are not the target person — do not invent an age from
+    # DOB/filesystem/face estimates (e.g. dogs scored 0.02 must not show 12.6y).
+    if is_no_match_photo(photo):
+        return None
     if photo.age_from_dob is not None:
         return float(photo.age_from_dob)
     if photo.estimated_age is not None:
@@ -116,6 +146,28 @@ def classify_photo(photo: PhotoRecord) -> str:
     if photo.target_found:
         return "main"
     return "excluded"
+
+
+def age_range_subfolder(
+    photo: PhotoRecord,
+    ranges: list[AgeRangeFolder],
+) -> str | None:
+    """
+    Subfolder name for a main-bucket photo when age ranges are configured.
+
+    Returns ``None`` when no ranges are set (flat export). Photos with no
+    usable age go to ``_unknown``; ages outside every range go to ``_other``.
+    """
+    if not ranges:
+        return None
+    age = effective_age_for_name(photo)
+    if age is None or age == float("inf"):
+        return "_unknown"
+    rounded = int(round(age))
+    for band in ranges:
+        if band.contains(rounded):
+            return band.folder_name
+    return "_other"
 
 
 def select_photos_for_export(
@@ -176,7 +228,9 @@ def export_numbered_copies(
         name = build_export_filename(
             index, photo, include_age_in_name=options.include_age_in_name
         )
-        planned.append(("main", index, photo, output_dir / name))
+        sub = age_range_subfolder(photo, options.age_range_folders)
+        dest_dir = output_dir / sub if sub else output_dir
+        planned.append(("main", index, photo, dest_dir / name))
 
     if options.export_unresolved_separate:
         for index, photo in enumerate(unresolved, start=1):

@@ -158,6 +158,17 @@ QPushButton#ghostButton {
   border: 1px solid #E5E7EB;
 }
 
+QPushButton#rotatorButton:checked {
+  background: #2F6BFF;
+  color: #FFFFFF;
+  border: 1px solid #2F6BFF;
+}
+
+QPushButton#rotatorButton:checked:hover {
+  background: #2558E0;
+  border-color: #2558E0;
+}
+
 /* Inputs */
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit {
   background: #FFFFFF;
@@ -193,11 +204,48 @@ QComboBox QAbstractItemView {
   outline: none;
 }
 
+/* Checkboxes — rounded to match input fields */
+QCheckBox {
+  spacing: 8px;
+}
+
+QCheckBox::indicator {
+  width: 18px;
+  height: 18px;
+  border: 1px solid #D1D5DB;
+  border-radius: 4px;
+  background: #FFFFFF;
+}
+
+QCheckBox::indicator:hover {
+  border-color: #2F6BFF;
+}
+
+QCheckBox::indicator:checked {
+  background: #2F6BFF;
+  border-color: #2F6BFF;
+  image: url("__CHECK_ICON__");
+}
+
+QCheckBox::indicator:disabled {
+  background: #F3F4F6;
+  border-color: #E5E7EB;
+}
+
 /* Cards / frames */
 QFrame#card, QFrame#metricCard {
   background: #FFFFFF;
   border: 1px solid #EEF0F4;
   border-radius: 12px;
+}
+
+QFrame#metricCard:hover {
+  border-color: #C7D2FE;
+}
+
+QFrame#metricCard[selected="true"] {
+  border-color: #2F6BFF;
+  background: #F8FAFF;
 }
 
 /* Inspector tray — same 12px radius as the preview wrap inside */
@@ -249,9 +297,20 @@ QProgressBar {
   max-height: 12px;
 }
 
+/* Modal analyze/install loaders — room for percent text. */
+QProgressBar#dialogProgress {
+  min-height: 22px;
+  max-height: 22px;
+  border-radius: 8px;
+}
+
 QProgressBar::chunk {
   background: #2F6BFF;
   border-radius: 6px;
+}
+
+QProgressBar#dialogProgress::chunk {
+  border-radius: 8px;
 }
 
 QProgressBar#successBar::chunk {

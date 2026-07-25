@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Optional
 
+from src.domain.match_status import is_no_match_photo
 from src.domain.models import (
     DateReliability,
     PhotoAnalysis,
@@ -124,6 +125,15 @@ def decide_sort_for_record(
             effective_age=float(photo.manual_age),
             age_confidence=1.0,
             reason="manual_age",
+        )
+
+    # Hard no-match: keep out of the chronological age timeline.
+    if is_no_match_photo(photo):
+        return SortDecision(
+            sort_score=float("inf"),
+            effective_age=None,
+            age_confidence=0.0,
+            reason="target_not_found",
         )
 
     if (

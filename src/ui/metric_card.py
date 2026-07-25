@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -16,7 +17,9 @@ from src.ui.icons import icon_pixmap
 
 
 class MetricCard(QFrame):
-    """White card with icon, large number, and label."""
+    """White card with icon, large number, and label. Clickable filter control."""
+
+    clicked = Signal()
 
     def __init__(
         self,
@@ -31,6 +34,8 @@ class MetricCard(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMinimumHeight(88)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setProperty("selected", False)
 
         icon = QLabel()
         icon.setPixmap(icon_pixmap(icon_name, size=22, color=icon_color))
@@ -57,9 +62,23 @@ class MetricCard(QFrame):
     def set_value(self, value: int | str) -> None:
         self._value.setText(str(value))
 
+    def set_selected(self, selected: bool) -> None:
+        if bool(self.property("selected")) == selected:
+            return
+        self.setProperty("selected", selected)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
 
 class MetricsRow(QWidget):
-    """Row of five project metric cards."""
+    """Row of five project metric cards that drive the timeline filter."""
+
+    filter_requested = Signal(str)  # ReviewFilter value
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -79,17 +98,32 @@ class MetricsRow(QWidget):
             "With EXIF dates", icon_name="calendar", icon_color="#7C3AED"
         )
 
+        self._cards: dict[str, MetricCard] = {
+            "all": self._scanned,
+            "target_found": self._found,
+            "needs_review": self._review,
+            "not_found": self._not_found,
+            "with_exif": self._dates,
+        }
+        for key, card in self._cards.items():
+            card.clicked.connect(lambda k=key: self._on_card_clicked(k))
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
-        for card in (
-            self._scanned,
-            self._found,
-            self._review,
-            self._not_found,
-            self._dates,
-        ):
+        for card in self._cards.values():
             layout.addWidget(card, stretch=1)
+
+        self.set_active_filter("all")
+
+    def _on_card_clicked(self, key: str) -> None:
+        self.set_active_filter(key)
+        self.filter_requested.emit(key)
+
+    def set_active_filter(self, key: str) -> None:
+        """Highlight the card that matches the timeline filter (or none)."""
+        for card_key, card in self._cards.items():
+            card.set_selected(card_key == key)
 
     def update_stats(self, stats: dict[str, int]) -> None:
         self._scanned.set_value(stats.get("total", 0))

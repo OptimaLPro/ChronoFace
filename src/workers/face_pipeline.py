@@ -298,6 +298,7 @@ class FaceAnalysisPipeline:
         photo_ids: Sequence[int],
         *,
         on_progress: ProgressCallback | None = None,
+        should_cancel: CancelCallback | None = None,
     ) -> list[PhotoRecord]:
         """
         Force face detection / matching / age estimation for specific photos.
@@ -310,6 +311,9 @@ class FaceAnalysisPipeline:
             return []
 
         references = self._build_reference_embeddings()
+        if should_cancel and should_cancel():
+            return []
+
         photos = [
             photo
             for photo in self.photo_repo.list_photos()
@@ -317,8 +321,12 @@ class FaceAnalysisPipeline:
         ]
         total = len(photos)
         updated: list[PhotoRecord] = []
+        cancelled = False
 
         for index, photo in enumerate(photos, start=1):
+            if should_cancel and should_cancel():
+                cancelled = True
+                break
             if on_progress:
                 on_progress(
                     index,
@@ -331,9 +339,11 @@ class FaceAnalysisPipeline:
             self._process_photo(photo, references)
             updated.append(photo)
 
-        if on_progress:
-            on_progress(total, total, "Updating age ranking…")
-        self._recompute_ranking()
+        # Keep timeline consistent for any photos already rewritten.
+        if updated:
+            if on_progress and not cancelled:
+                on_progress(total, total, "Updating age ranking…")
+            self._recompute_ranking()
         # Return latest rows after ranking rewrite.
         latest = {
             photo.id: photo

@@ -130,6 +130,30 @@ class FaceRepository:
             connection.close()
         return self.get_face(face_id)
 
+    def update_face_bbox(
+        self,
+        face_id: int,
+        *,
+        bbox_x: float,
+        bbox_y: float,
+        bbox_w: float,
+        bbox_h: float,
+    ) -> None:
+        """Update face geometry in place (keeps id / crops / embeddings)."""
+        connection = initialize_database(self.db_path)
+        try:
+            connection.execute(
+                """
+                UPDATE faces
+                SET bbox_x = ?, bbox_y = ?, bbox_w = ?, bbox_h = ?
+                WHERE id = ?
+                """,
+                (float(bbox_x), float(bbox_y), float(bbox_w), float(bbox_h), face_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
     def restore_face_states(
         self,
         photo_id: int,

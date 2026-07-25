@@ -50,4 +50,6 @@ def load_app_stylesheet() -> str:
 
     path = theme_qss_path()
     body = path.read_text(encoding="utf-8") if path.is_file() else ""
+    check_icon = (assets_dir() / "icons" / "check.svg").resolve().as_posix()
+    body = body.replace("__CHECK_ICON__", check_icon)
     return f"{body}\n{DEFAULT_SCROLLBAR_STYLE}"

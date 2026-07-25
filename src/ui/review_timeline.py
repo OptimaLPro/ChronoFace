@@ -37,8 +37,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.domain.match_status import is_no_match_photo
 from src.domain.models import DateReliability, PhotoRecord, ReviewStatus
 from src.export.file_exporter import effective_age_for_name
+from src.ui.needs_review_panel import categorize_review_photo
 from src.ui.photo_lightbox import open_photo_lightbox
 from src.ui.thumbnail_loader import load_thumbnail_pixmap
 from src.ui.message_dialog import MessageDialog
@@ -57,22 +59,26 @@ _THUMB_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 
 class ReviewFilter(str, Enum):
     ALL = "all"
+    TARGET_FOUND = "target_found"
     NEEDS_REVIEW = "needs_review"
     LOW_CONFIDENCE = "low_confidence"
     HIGH_CONFIDENCE = "high_confidence"
     NO_FACE = "no_face"
     NOT_FOUND = "not_found"
+    WITH_EXIF = "with_exif"
     MANUAL = "manual"
     EXCLUDED = "excluded"
 
 
 FILTER_LABELS = {
     ReviewFilter.ALL: "All photos",
-    ReviewFilter.NEEDS_REVIEW: "Needs review / matched",
+    ReviewFilter.TARGET_FOUND: "Target found",
+    ReviewFilter.NEEDS_REVIEW: "Needs review",
     ReviewFilter.LOW_CONFIDENCE: "Low confidence",
     ReviewFilter.HIGH_CONFIDENCE: "High confidence matches",
     ReviewFilter.NO_FACE: "No face",
     ReviewFilter.NOT_FOUND: "Target not found",
+    ReviewFilter.WITH_EXIF: "With EXIF dates",
     ReviewFilter.MANUAL: "Manually corrected",
     ReviewFilter.EXCLUDED: "Excluded",
 }
@@ -150,7 +156,7 @@ def _status_color(photo: PhotoRecord) -> QColor:
         return QColor("#616161")
     if photo.review_status == ReviewStatus.NO_FACE:
         return QColor("#6a1b9a")
-    if photo.review_status == ReviewStatus.TARGET_NOT_FOUND:
+    if is_no_match_photo(photo):
         return QColor("#c62828")
     if photo.review_status == ReviewStatus.LOW_CONFIDENCE:
         # Age from DOB+EXIF is still trustworthy; show Match blue.
@@ -164,19 +170,20 @@ def _status_color(photo: PhotoRecord) -> QColor:
     return QColor("#455a64")
 
 
-def _matches_filter(photo: PhotoRecord, review_filter: ReviewFilter) -> bool:
+def _matches_filter(
+    photo: PhotoRecord,
+    review_filter: ReviewFilter,
+    *,
+    date_of_birth: date | None = None,
+) -> bool:
     if review_filter == ReviewFilter.ALL:
         # Soft-removed photos live under the Excluded filter only.
         return photo.review_status != ReviewStatus.EXCLUDED
+    if review_filter == ReviewFilter.TARGET_FOUND:
+        return bool(photo.target_found) and photo.review_status != ReviewStatus.EXCLUDED
     if review_filter == ReviewFilter.NEEDS_REVIEW:
-        return (
-            photo.review_status
-            in {
-                ReviewStatus.NEEDS_REVIEW,
-                ReviewStatus.PENDING,
-            }
-            or photo.target_found
-        )
+        # Same queue as the Needs review metric / panel.
+        return categorize_review_photo(photo, date_of_birth) is not None
     if review_filter == ReviewFilter.LOW_CONFIDENCE:
         return photo.review_status == ReviewStatus.LOW_CONFIDENCE
     if review_filter == ReviewFilter.HIGH_CONFIDENCE:
@@ -184,7 +191,12 @@ def _matches_filter(photo: PhotoRecord, review_filter: ReviewFilter) -> bool:
     if review_filter == ReviewFilter.NO_FACE:
         return photo.review_status == ReviewStatus.NO_FACE
     if review_filter == ReviewFilter.NOT_FOUND:
-        return photo.review_status == ReviewStatus.TARGET_NOT_FOUND
+        return is_no_match_photo(photo)
+    if review_filter == ReviewFilter.WITH_EXIF:
+        return (
+            photo.date_reliability == DateReliability.RELIABLE_EXIF
+            and photo.review_status != ReviewStatus.EXCLUDED
+        )
     if review_filter == ReviewFilter.MANUAL:
         return photo.review_status == ReviewStatus.MANUALLY_CORRECTED
     if review_filter == ReviewFilter.EXCLUDED:
@@ -516,7 +528,9 @@ class ReviewTimeline(QWidget):
                 visible_index = index
                 break
 
-        still_matches = _matches_filter(photo, self._filter)
+        still_matches = _matches_filter(
+            photo, self._filter, date_of_birth=self._date_of_birth
+        )
         if visible_index >= 0 and not still_matches:
             self._rebuild_after_removal(visible_index)
             return
@@ -526,12 +540,30 @@ class ReviewTimeline(QWidget):
         if visible_index >= 0:
             self.refresh_item(photo)
 
+    def set_filter(self, review_filter: ReviewFilter) -> None:
+        """Set the active filter and sync the toolbar combo."""
+        for index in range(self._filter_combo.count()):
+            if self._filter_combo.itemData(index) == review_filter.value:
+                if self._filter_combo.currentIndex() != index:
+                    self._filter_combo.setCurrentIndex(index)
+                elif self._filter != review_filter:
+                    self._filter = review_filter
+                    self._rebuild()
+                return
+        self._filter = review_filter
+        self._rebuild()
+
+    def current_filter(self) -> ReviewFilter:
+        return self._filter
+
     def _rebuild_after_removal(self, removed_index: int) -> None:
         """Rebuild the grid and select the next photo (or clear if last)."""
         self._list.blockSignals(True)
         self._list.clear()
         visible = [
-            photo for photo in self._photos if _matches_filter(photo, self._filter)
+            photo
+            for photo in self._photos
+            if _matches_filter(photo, self._filter, date_of_birth=self._date_of_birth)
         ]
         for photo in visible:
             item = QListWidgetItem()
@@ -678,7 +710,9 @@ class ReviewTimeline(QWidget):
         self._list.blockSignals(True)
         self._list.clear()
         visible = [
-            photo for photo in self._photos if _matches_filter(photo, self._filter)
+            photo
+            for photo in self._photos
+            if _matches_filter(photo, self._filter, date_of_birth=self._date_of_birth)
         ]
         for photo in visible:
             item = QListWidgetItem()

@@ -6,7 +6,7 @@ from datetime import date
 from typing import Optional
 
 from PySide6.QtCore import QSettings, QThread, Qt, Signal
-from PySide6.QtGui import QUndoStack
+from PySide6.QtGui import QKeySequence, QShortcut, QUndoStack
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -20,9 +20,12 @@ from PySide6.QtWidgets import (
 from src.commands import BulkPhotosSnapshotCommand, copy_photos
 from src.database.photo_repository import PhotoRepository
 from src.database.repository import ProjectRepository
+from src.domain.match_status import is_no_match_photo
 from src.domain.models import DateReliability, PhotoRecord, ProjectConfig, ReviewStatus
 from src.metadata.age_from_dob import age_from_dob_and_capture
+from src.settings.app_settings import load_settings, save_settings
 from src.sorting.ranking import rank_photo_records
+from src.sorting.scoring import apply_sort_decision, decide_sort_for_record
 from src.ui.age_band_bar import AgeBandBar
 from src.ui.metric_card import MetricsRow
 from src.ui.needs_review_panel import NeedsReviewPanel, photos_needing_review
@@ -30,8 +33,11 @@ from src.ui.photo_details_panel import PhotoDetailsPanel
 from src.ui.processing_status_bar import ProcessingStatusBar
 from src.ui.project_header import ProjectHeader
 from src.ui.review_dialog import _SinglePhotoWorker
-from src.ui.review_timeline import ReviewFilter, ReviewTimeline
+from src.ui.review_timeline import ReviewFilter, ReviewTimeline, parse_review_filter
+from src.ui.rotator_help_dialog import RotatorHelpDialog
 from src.ui.message_dialog import MessageDialog, ProgressDialog
+from src.utils.lossless_rotate import LosslessRotateError, RotateDirection
+from src.utils.photo_rotate import rotate_project_photo
 
 
 class DashboardPage(QWidget):
@@ -53,6 +59,7 @@ class DashboardPage(QWidget):
         self._worker: _SinglePhotoWorker | None = None
         self._progress: ProgressDialog | None = None
         self._photos: list[PhotoRecord] = []
+        self._rotator_mode = False
 
         self._header = ProjectHeader()
         self._header.edit_requested.connect(self.edit_project_requested.emit)
@@ -67,6 +74,10 @@ class DashboardPage(QWidget):
         self._details = PhotoDetailsPanel()
         self._status_bar = ProcessingStatusBar()
 
+        self._metrics.filter_requested.connect(self._on_metric_filter)
+        self._timeline._filter_combo.currentIndexChanged.connect(
+            self._sync_metric_selection
+        )
         self._timeline.selection_changed.connect(self._details.set_photo)
         self._timeline.order_changed.connect(self._on_order_changed)
         self._timeline.remove_requested.connect(self._on_remove_requested)
@@ -90,6 +101,15 @@ class DashboardPage(QWidget):
         self._timeline_view_btn.clicked.connect(lambda: self._set_view_mode("timeline"))
         self._grid_view_btn.clicked.connect(lambda: self._set_view_mode("grid"))
 
+        self._rotator_btn = QPushButton("Rotator")
+        self._rotator_btn.setObjectName("rotatorButton")
+        self._rotator_btn.setCheckable(True)
+        self._rotator_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._rotator_btn.setToolTip(
+            "Lossless photo rotator — E left, R right. Click again to finish."
+        )
+        self._rotator_btn.toggled.connect(self._set_rotator_mode)
+
         self._save_order_btn = QPushButton("Save Order")
         self._save_order_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._save_order_btn.clicked.connect(self.save_order)
@@ -97,6 +117,23 @@ class DashboardPage(QWidget):
         self._rerank_btn = QPushButton("Re-rank by Ages")
         self._rerank_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._rerank_btn.clicked.connect(self.rerank_by_ages)
+
+        self._rotate_left_shortcut = QShortcut(QKeySequence("E"), self)
+        self._rotate_left_shortcut.setContext(
+            Qt.ShortcutContext.WidgetWithChildrenShortcut
+        )
+        self._rotate_left_shortcut.setEnabled(False)
+        self._rotate_left_shortcut.activated.connect(
+            lambda: self._rotate_selected(RotateDirection.LEFT)
+        )
+        self._rotate_right_shortcut = QShortcut(QKeySequence("R"), self)
+        self._rotate_right_shortcut.setContext(
+            Qt.ShortcutContext.WidgetWithChildrenShortcut
+        )
+        self._rotate_right_shortcut.setEnabled(False)
+        self._rotate_right_shortcut.activated.connect(
+            lambda: self._rotate_selected(RotateDirection.RIGHT)
+        )
 
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(0, 0, 0, 0)
@@ -107,6 +144,7 @@ class DashboardPage(QWidget):
         toolbar.addWidget(self._timeline.header_bar, 0, vcenter)
         toolbar.addWidget(self._timeline_view_btn, 0, vcenter)
         toolbar.addWidget(self._grid_view_btn, 0, vcenter)
+        toolbar.addWidget(self._rotator_btn, 0, vcenter)
         toolbar.addWidget(self._save_order_btn, 0, vcenter)
         toolbar.addWidget(self._rerank_btn, 0, vcenter)
 
@@ -210,21 +248,33 @@ class DashboardPage(QWidget):
         self._header.set_actions_enabled(has)
         self._save_order_btn.setEnabled(has)
         self._rerank_btn.setEnabled(has)
+        self._rotator_btn.setEnabled(has)
+        if not has and self._rotator_mode:
+            self._set_rotator_mode(False)
 
     def reload(self) -> None:
         if self._repo is None or self._project is None:
             return
         photos = self._repo.list_photos()
-        if any(photo.manual_order is not None for photo in photos):
-            photos = sorted(
-                photos,
-                key=lambda photo: (
-                    photo.manual_order is None,
-                    photo.manual_order if photo.manual_order is not None else 10**9,
-                    photo.sort_score if photo.sort_score is not None else float("inf"),
-                    str(photo.original_path).lower(),
-                ),
-            )
+        dob = self._project.date_of_birth
+        # Drop stale ages for hard no-matches so they leave the age timeline.
+        for photo in photos:
+            if (
+                is_no_match_photo(photo)
+                and photo.manual_order is None
+                and photo.manual_age is None
+            ):
+                decision = decide_sort_for_record(photo, date_of_birth=dob)
+                apply_sort_decision(photo, decision, date_of_birth=dob)
+        photos = sorted(
+            photos,
+            key=lambda photo: (
+                photo.manual_order is None,
+                photo.manual_order if photo.manual_order is not None else 10**9,
+                photo.sort_score if photo.sort_score is not None else float("inf"),
+                str(photo.original_path).lower(),
+            ),
+        )
         self._photos = photos
         self._timeline.set_photos(photos)
         self._needs_review.set_photos(photos)
@@ -240,18 +290,30 @@ class DashboardPage(QWidget):
         stats["needs_review_total"] = len(
             photos_needing_review(self._photos, dob)
         )
+        # Count hard no-matches by score/status, not only TARGET_NOT_FOUND rows.
+        # Score 0.02 dog/object faces must increment Not found.
+        stats["target_not_found"] = sum(
+            1 for photo in self._photos if is_no_match_photo(photo)
+        )
         # Only count reliable EXIF capture dates — not filesystem mtime guesses.
         stats["with_dates"] = stats.get("reliable_date", 0)
         self._metrics.update_stats(stats)
 
+    def _on_metric_filter(self, filter_key: str) -> None:
+        parsed = parse_review_filter(filter_key)
+        if parsed is None:
+            return
+        self._timeline.set_filter(parsed)
+
+    def _sync_metric_selection(self) -> None:
+        current = self._timeline.current_filter().value
+        # Only the five metric cards light up; other combo filters clear highlight.
+        self._metrics.set_active_filter(current)
+
     def focus_needs_review(self) -> None:
-        # Show all photos so Unknown-age / low-match items stay visible,
-        # then jump selection to the first needs-review card if present.
-        combo = self._timeline._filter_combo
-        for index in range(combo.count()):
-            if combo.itemData(index) == ReviewFilter.ALL.value:
-                combo.setCurrentIndex(index)
-                break
+        # Jump to the needs-review queue and select the first item if present.
+        self._timeline.set_filter(ReviewFilter.NEEDS_REVIEW)
+        self._metrics.set_active_filter(ReviewFilter.NEEDS_REVIEW.value)
         items = photos_needing_review(
             self._photos,
             self._project.date_of_birth if self._project else None,
@@ -281,6 +343,95 @@ class DashboardPage(QWidget):
         else:
             # Denser grid
             self._timeline.set_thumb_index(min(self._timeline.thumb_index, 1))
+
+    def _set_rotator_mode(self, enabled: bool) -> None:
+        if enabled and self._project is None:
+            enabled = False
+        if enabled and not self._rotator_mode:
+            settings = load_settings()
+            if settings.show_rotator_help:
+                dialog = RotatorHelpDialog(self.window())
+                if not dialog.exec():
+                    self._rotator_btn.blockSignals(True)
+                    self._rotator_btn.setChecked(False)
+                    self._rotator_btn.blockSignals(False)
+                    return
+                if dialog.never_show_again:
+                    settings.show_rotator_help = False
+                    save_settings(settings)
+
+        if enabled == self._rotator_mode and self._rotator_btn.isChecked() == enabled:
+            self._rotate_left_shortcut.setEnabled(enabled)
+            self._rotate_right_shortcut.setEnabled(enabled)
+            return
+
+        self._rotator_mode = enabled
+        if self._rotator_btn.isChecked() != enabled:
+            self._rotator_btn.blockSignals(True)
+            self._rotator_btn.setChecked(enabled)
+            self._rotator_btn.blockSignals(False)
+        self._rotate_left_shortcut.setEnabled(enabled)
+        self._rotate_right_shortcut.setEnabled(enabled)
+        if enabled:
+            self.status_message.emit(
+                "Rotator on — E left · R right · click Rotator again to finish"
+            )
+            self._timeline.setFocus(Qt.FocusReason.OtherFocusReason)
+        else:
+            self.status_message.emit("Rotator off")
+
+    def _rotate_selected(self, direction: RotateDirection) -> None:
+        if not self._rotator_mode or self._project is None or self._repo is None:
+            return
+        if self._is_local_busy():
+            MessageDialog.information(
+                self, "Busy", "Wait for the current photo analysis to finish."
+            )
+            return
+        selected = self._timeline.selected_photos()
+        if not selected:
+            MessageDialog.information(
+                self,
+                "No Photo Selected",
+                "Select one or more photos, then press E (left) or R (right).",
+            )
+            return
+
+        errors: list[str] = []
+        updated_count = 0
+        last_updated: PhotoRecord | None = None
+        for photo in selected:
+            try:
+                updated = rotate_project_photo(
+                    self._project.id, photo, direction
+                )
+            except (LosslessRotateError, OSError, ValueError) as exc:
+                errors.append(f"{photo.original_path.name}: {exc}")
+                continue
+            updated_count += 1
+            last_updated = updated
+            self._on_photo_updated(updated)
+
+        if last_updated is not None and len(selected) == 1:
+            self._details.set_photo(last_updated)
+
+        if self._undo_stack is not None and updated_count:
+            # File bytes changed on disk — DB-only undo cannot restore pixels.
+            self._undo_stack.clear()
+
+        label = "left" if direction is RotateDirection.LEFT else "right"
+        if updated_count:
+            self.status_message.emit(
+                f"Rotated {updated_count} photo(s) {label} (lossless)"
+            )
+        if errors:
+            MessageDialog.warning(
+                self,
+                "Rotate Incomplete",
+                f"Rotated {updated_count} photo(s).\n\n"
+                + "\n".join(errors[:8])
+                + ("\n…" if len(errors) > 8 else ""),
+            )
 
     def _on_order_changed(self, _photos: list[PhotoRecord]) -> None:
         self._dirty_order = True
@@ -432,8 +583,10 @@ class DashboardPage(QWidget):
             label="Starting…",
             minimum=0,
             maximum=total,
+            cancellable=True,
         )
         progress.setValue(0)
+        progress.cancelled.connect(self._cancel_single_analysis)
         progress.show()
         self._progress = progress
 
@@ -448,14 +601,23 @@ class DashboardPage(QWidget):
         thread.started.connect(worker.run)
         worker.progress.connect(self._on_single_progress)
         worker.finished.connect(self._on_single_finished)
+        worker.cancelled.connect(self._on_single_cancelled)
         worker.error.connect(self._on_single_error)
         worker.finished.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
         worker.error.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(self._on_single_thread_finished)
         self._worker_thread = thread
         self._worker = worker
         thread.start()
+
+    def _cancel_single_analysis(self) -> None:
+        if self._worker is not None:
+            self._worker.request_cancel()
+        if self._progress is not None:
+            self._progress.setLabelText("Cancel requested…")
+            self._progress.setCancelEnabled(False)
 
     def _on_single_progress(self, current: int, total: int, message: str) -> None:
         if self._progress is None:
@@ -473,6 +635,20 @@ class DashboardPage(QWidget):
         self.reload()
         MessageDialog.information(
             self, "Analysis Complete", "Finished re-analyzing the selected photo(s)."
+        )
+
+    def _on_single_cancelled(self) -> None:
+        if self._progress is not None:
+            self._progress.close()
+            self._progress = None
+        if self._undo_stack is not None:
+            self._undo_stack.clear()
+        self.reload()
+        self.status_message.emit("Photo analysis cancelled")
+        MessageDialog.information(
+            self,
+            "Analysis Cancelled",
+            "Re-analysis stopped. Progress already completed was saved.",
         )
 
     def _on_single_error(self, message: str) -> None:

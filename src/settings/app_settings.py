@@ -51,6 +51,9 @@ class AppSettings:
     """Fingerprint of the model pack that produced current embeddings."""
 
     show_privacy_banner: bool = True
+    show_rotator_help: bool = True
+    """Show the Photo Rotator instructions dialog when entering rotator mode."""
+
     log_verbose: bool = False
 
     def resolved_preset_id(self) -> ModelPresetId:

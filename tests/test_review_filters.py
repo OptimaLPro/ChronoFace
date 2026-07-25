@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from src.domain.models import PhotoRecord, ReviewStatus
+from src.domain.models import DateReliability, PhotoRecord, ReviewStatus
 from src.ui.review_timeline import (
     ReviewFilter,
     _matches_filter,
@@ -41,9 +41,40 @@ def test_review_filter_all_hides_excluded() -> None:
     assert _matches_filter(photo, ReviewFilter.EXCLUDED)
 
 
+def test_review_filter_target_found() -> None:
+    matched = PhotoRecord(
+        project_id="p",
+        original_path=Path("a.jpg"),
+        target_found=True,
+    )
+    missed = PhotoRecord(
+        project_id="p",
+        original_path=Path("b.jpg"),
+        target_found=False,
+    )
+    assert _matches_filter(matched, ReviewFilter.TARGET_FOUND)
+    assert not _matches_filter(missed, ReviewFilter.TARGET_FOUND)
+
+
+def test_review_filter_with_exif() -> None:
+    with_exif = PhotoRecord(
+        project_id="p",
+        original_path=Path("a.jpg"),
+        date_reliability=DateReliability.RELIABLE_EXIF,
+    )
+    without = PhotoRecord(
+        project_id="p",
+        original_path=Path("b.jpg"),
+        date_reliability=DateReliability.WEAK_FILESYSTEM,
+    )
+    assert _matches_filter(with_exif, ReviewFilter.WITH_EXIF)
+    assert not _matches_filter(without, ReviewFilter.WITH_EXIF)
+
+
 def test_parse_review_filter_accepts_qt_string_userdata() -> None:
     # QComboBox stores str Enums as plain strings in itemData.
     assert parse_review_filter("low_confidence") == ReviewFilter.LOW_CONFIDENCE
     assert parse_review_filter(ReviewFilter.NO_FACE) == ReviewFilter.NO_FACE
+    assert parse_review_filter("with_exif") == ReviewFilter.WITH_EXIF
     assert parse_review_filter("not-a-filter") is None
     assert parse_review_filter(None) is None

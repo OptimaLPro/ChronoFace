@@ -51,6 +51,7 @@ def test_settings_roundtrip(tmp_path: Path, monkeypatch) -> None:
         low_confidence_threshold=0.33,
         det_size=512,
         show_privacy_banner=False,
+        show_rotator_help=False,
     )
     save_settings(settings)
     loaded = load_settings()
@@ -60,6 +61,7 @@ def test_settings_roundtrip(tmp_path: Path, monkeypatch) -> None:
     assert loaded.low_confidence_threshold == 0.33
     assert loaded.det_size == 512
     assert loaded.show_privacy_banner is False
+    assert loaded.show_rotator_help is False
     assert loaded.effective_match_threshold() == 0.41
     assert "buffalo_s" in loaded.model_fingerprint()
     assert "mivolo_v2" in loaded.model_fingerprint()

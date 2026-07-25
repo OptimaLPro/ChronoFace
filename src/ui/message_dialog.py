@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QComboBox,
@@ -326,6 +326,8 @@ class MessageDialog(OverlayDialog):
 class ProgressDialog(OverlayDialog):
     """Themed indeterminate / determinate progress modal."""
 
+    cancelled = Signal()
+
     def __init__(
         self,
         parent: QWidget | None = None,
@@ -334,10 +336,13 @@ class ProgressDialog(OverlayDialog):
         label: str = "",
         minimum: int = 0,
         maximum: int = 0,
+        cancellable: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        self._cancellable = cancellable
+        self._cancel_btn: QPushButton | None = None
 
         title_label = QLabel(title)
         title_label.setStyleSheet(
@@ -350,6 +355,7 @@ class ProgressDialog(OverlayDialog):
         )
 
         self._bar = QProgressBar()
+        self._bar.setObjectName("dialogProgress")
         self._bar.setTextVisible(maximum > 0)
         self._bar.setRange(minimum, maximum)
         if maximum <= 0:
@@ -358,6 +364,18 @@ class ProgressDialog(OverlayDialog):
         self._card_layout.addWidget(title_label)
         self._card_layout.addWidget(self._label)
         self._card_layout.addWidget(self._bar)
+
+        if cancellable:
+            self._cancel_btn = QPushButton("Cancel")
+            self._cancel_btn.setObjectName("dangerButton")
+            self._cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._cancel_btn.clicked.connect(self._request_cancel)
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 4, 0, 0)
+            row.addStretch(1)
+            row.addWidget(self._cancel_btn)
+            self._card_layout.addLayout(row)
+
         self._layout_card()
 
     def setLabelText(self, text: str) -> None:  # noqa: N802 — Qt API mirror
@@ -384,10 +402,25 @@ class ProgressDialog(OverlayDialog):
         self._card.setMinimumWidth(width)
         self._layout_card()
 
+    def setCancelEnabled(self, enabled: bool) -> None:  # noqa: N802
+        if self._cancel_btn is not None:
+            self._cancel_btn.setEnabled(enabled)
+
+    def _request_cancel(self) -> None:
+        if self._cancel_btn is not None:
+            self._cancel_btn.setEnabled(False)
+        self.cancelled.emit()
+
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
-        # Block Esc while work runs (matches cancel-less QProgressDialog).
         if event.key() == Qt.Key.Key_Escape:
-            event.ignore()
+            if (
+                self._cancellable
+                and self._cancel_btn is not None
+                and self._cancel_btn.isEnabled()
+            ):
+                self._request_cancel()
+            else:
+                event.ignore()
             return
         super().keyPressEvent(event)
 

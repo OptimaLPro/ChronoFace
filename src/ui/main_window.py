@@ -133,7 +133,7 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
 
         restart_action = QAction("Restart", self)
-        restart_action.setShortcut("Ctrl+Shift+F5")
+        restart_action.setShortcut("Ctrl+Shift+R")
         restart_action.setToolTip("Quit and reopen ChronoFace")
         restart_action.triggered.connect(self.restart_application)
         file_menu.addAction(restart_action)
